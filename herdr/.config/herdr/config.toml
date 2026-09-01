@@ -4,8 +4,5 @@ auto_switch = true
 dark_name = "vesper"
 light_name = "gruvbox-light"
 
-[keys]
-prefix = "ctrl+;"
-
 [ui]
 show_agent_labels_on_pane_borders = false
