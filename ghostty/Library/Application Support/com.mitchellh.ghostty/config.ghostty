@@ -1,2 +1,2 @@
-# Match Ghostty's terminal palette and background to Herdr's Vesper UI theme.
-theme = Vesper
+# Follow macOS appearance with a high-contrast warm light theme and Vesper dark.
+theme = dark:Vesper,light:Gruvbox Light

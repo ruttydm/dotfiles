@@ -1,6 +1,8 @@
 [theme]
 name = "vesper"
-auto_switch = false
+auto_switch = true
+dark_name = "vesper"
+light_name = "gruvbox-light"
 
 [ui]
 show_agent_labels_on_pane_borders = false
