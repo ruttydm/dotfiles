@@ -14,7 +14,7 @@ git clone https://github.com/ruttydm/dotfiles.git ~/Projects/dotfiles
 | Machine | What the script installs | What it links |
 |---|---|---|
 | macOS | `stow` (Homebrew) | `ghostty`, `herdr` |
-| Omarchy / Arch | `stow`, `pipewire-zeroconf`, `ghostty`, Zen Browser | `hypr`, `pipewire`, `ghostty-linux`, `wallpaper` |
+| Omarchy / Arch | `stow`, `pipewire-zeroconf`, `ghostty`, Zen Browser | `hypr`, `pipewire`, `ghostty-linux`, `wallpaper`, `tailscale` |
 
 On Linux, pick **Office** in the volume mixer to play through the HomePod stereo pair. Do not pick **Office (2)**; that is the pair member, not the leader. The installer also clones [Pierre-Aoki Netrunner](https://github.com/Pierre-Aoki/omarchy-netrunner-theme) into `~/.config/omarchy/themes/netrunner` if it is missing (`omarchy theme install`, not Stow).
 
@@ -28,6 +28,7 @@ You can re-run `./install.sh` any time. It is safe if things are already install
 - `hypr` — Omarchy-only Hyprland input overrides (agent/Ghostty touchpad scroll).
 - `pipewire` — Linux only. Turns on AirPlay discovery so HomePods appear as audio outputs.
 - `wallpaper` — Linux only. A user systemd timer that rotates the current Omarchy theme's still wallpapers every 15 minutes. The next image is chosen by pushing CSPRNG noise through Lorenz, logistic, Ikeda, Weyl, Arnold, and Blum–Blum–Shub maps, then taking the orbit modulo the wallpaper count (skipping the current still). Preview with `omarchy-wallpaper-orbit --dry-run`. Stop with `systemctl --user disable --now omarchy-wallpaper-orbit.timer`.
+- `tailscale` — Linux only. Turns on Tailscale SSH so other devices on the tailnet can `ssh` in, and opens TCP/22 on `tailscale0` only (not public Wi-Fi). `install.sh` runs `enable-tailscale-ssh` when Tailscale is already logged in. A post-boot hook re-asserts `tailscale set --ssh`. Re-run with `enable-tailscale-ssh`.
 
 Netrunner is not a Stow package. On Omarchy, `install.sh` runs `omarchy theme install https://github.com/Pierre-Aoki/omarchy-netrunner-theme` if `~/.config/omarchy/themes/netrunner` is missing. That clone is Omarchy-managed so theme updates stay `omarchy theme update`.
 
@@ -80,7 +81,7 @@ Preview without changing anything:
 
 ```sh
 cd ~/Projects/dotfiles
-stow --simulate --verbose=2 --target="$HOME" hypr pipewire ghostty-linux wallpaper   # Linux
+stow --simulate --verbose=2 --target="$HOME" hypr pipewire ghostty-linux wallpaper tailscale   # Linux
 stow --simulate --verbose=2 --target="$HOME" ghostty herdr                 # macOS
 ```
 
@@ -89,7 +90,7 @@ stow --simulate --verbose=2 --target="$HOME" ghostty herdr                 # mac
 ```sh
 cd ~/Projects/dotfiles
 stow --delete --target="$HOME" ghostty herdr                      # macOS
-stow --delete --target="$HOME" hypr pipewire ghostty-linux wallpaper  # Omarchy / Arch
+stow --delete --target="$HOME" hypr pipewire ghostty-linux wallpaper tailscale  # Omarchy / Arch
 ```
 
 Deleting Stow links does not delete the tracked files in this repository.

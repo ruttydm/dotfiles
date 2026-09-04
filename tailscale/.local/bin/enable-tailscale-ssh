@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Enable SSH from other devices on this Tailscale tailnet.
+# Port 22 is opened on tailscale0 only, not on public Wi-Fi or LAN.
+set -euo pipefail
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+as_root() {
+  if ((EUID == 0)); then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+ssh_banner() {
+  local host=$1
+  python3 - "$host" <<'PY'
+import socket, sys
+host = sys.argv[1]
+s = socket.socket()
+s.settimeout(3)
+try:
+    s.connect((host, 22))
+    data = s.recv(120)
+    sys.stdout.write(data.decode("latin1", "replace").strip())
+except Exception:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+
+if ! need_cmd tailscale; then
+  echo "tailscale is not installed. On Omarchy: omarchy install service tailscale" >&2
+  exit 1
+fi
+
+if ! tailscale status >/dev/null 2>&1; then
+  echo "Tailscale is installed but not logged in. Run: tailscale up --accept-routes --ssh" >&2
+  exit 1
+fi
+
+echo "Enabling Tailscale SSH..."
+tailscale set --ssh
+
+ip4=$(tailscale ip -4)
+ip6=$(tailscale ip -6 2>/dev/null || true)
+dns=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+user=${USER:-$(id -un)}
+
+if need_cmd ufw; then
+  echo "Allowing TCP/22 on tailscale0 only..."
+  as_root ufw allow in on tailscale0 to any port 22 proto tcp comment 'tailscale-ssh' >/dev/null
+  as_root ufw reload >/dev/null
+fi
+
+banner=$(ssh_banner "$ip4" || true)
+if [[ $banner != *Tailscale* ]]; then
+  echo "Restarting tailscaled so the SSH listener starts..."
+  as_root systemctl restart tailscaled.service
+  for _ in $(seq 1 30); do
+    if tailscale status >/dev/null 2>&1 && tailscale ip -4 >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  ip4=$(tailscale ip -4)
+  banner=$(ssh_banner "$ip4" || true)
+fi
+
+if [[ $banner != *Tailscale* ]]; then
+  echo "Tailscale SSH is enabled in prefs, but nothing is listening on ${ip4}:22 yet." >&2
+  echo "From a terminal, re-run: sudo enable-tailscale-ssh" >&2
+  echo "If it still fails, check Access controls → SSH in the Tailscale admin console." >&2
+  exit 1
+fi
+
+echo "Listening: $banner"
+echo "From another Tailscale device:"
+echo "  ssh ${user}@${dns}"
+echo "  ssh ${user}@${ip4}"
+if [[ -n $ip6 ]]; then
+  echo "  ssh ${user}@${ip6}"
+fi

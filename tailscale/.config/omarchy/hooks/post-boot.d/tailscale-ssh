@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Re-assert Tailscale SSH after login. Firewall rules persist in UFW;
+# this only keeps the Tailscale pref from drifting.
+command -v tailscale >/dev/null 2>&1 || exit 0
+tailscale status >/dev/null 2>&1 || exit 0
+tailscale set --ssh >/dev/null 2>&1 || true
