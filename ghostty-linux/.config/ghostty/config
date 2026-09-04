@@ -12,8 +12,13 @@ font-size = 9
 
 # Window
 window-theme = ghostty
-window-padding-x = 14
-window-padding-y = 14
+# Omarchy ships 14pt, which stacks with Hyprland gaps and boxes in fullscreen
+# TUIs. Ghostty docs use 4pt as the symmetric example; Hyprland-oriented
+# setups commonly use 4–8pt plus window-padding-balance so leftover cell
+# pixels are not dumped on the right/bottom.
+window-padding-x = 4
+window-padding-y = 4
+window-padding-balance = true
 confirm-close-surface=false
 resize-overlay = never
 gtk-toolbar-style = flat
@@ -38,10 +43,8 @@ keybind = super+control+shift+alt+arrow_up=resize_split:up,100
 keybind = super+control+shift+alt+arrow_left=resize_split:left,100
 keybind = super+control+shift+alt+arrow_right=resize_split:right,100
 
-# Native scroll (Omarchy default 0.95 stacked with Hyprland's 0.2 ghostty
-# window rule and felt like a crawl). Click-to-open OSC-8 links is Ghostty's
-# default, which Foot does not do.
-mouse-scroll-multiplier = 1
+# Native scroll. Omarchy default is 0.95.
+mouse-scroll-multiplier = 0.95
 
 # Fix general slowness on hyprland (https://github.com/ghostty-org/ghostty/discussions/3224)
 async-backend = epoll
