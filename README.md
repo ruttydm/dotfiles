@@ -4,7 +4,7 @@ Public, deliberately small dotfiles managed with [GNU Stow](https://www.gnu.org/
 
 ## New machine
 
-Clone, then run the installer. It installs missing system packages, links the right configs for this OS, and on Linux restarts PipeWire so HomePods show up as speakers.
+Clone, then run the installer. It installs missing system packages, links the right configs for this OS, and on Linux installs Zen as the default browser, sets Ghostty as the terminal, and restarts PipeWire so HomePods show up as speakers.
 
 ```sh
 git clone https://github.com/ruttydm/dotfiles.git ~/Projects/dotfiles
@@ -14,9 +14,9 @@ git clone https://github.com/ruttydm/dotfiles.git ~/Projects/dotfiles
 | Machine | What the script installs | What it links |
 |---|---|---|
 | macOS | `stow` (Homebrew) | `ghostty`, `herdr` |
-| Omarchy / Arch | `stow`, `pipewire-zeroconf`, `ghostty` | `hypr`, `pipewire`, `ghostty-linux` |
+| Omarchy / Arch | `stow`, `pipewire-zeroconf`, `ghostty`, Zen Browser | `hypr`, `pipewire`, `ghostty-linux` |
 
-On Linux, pick **Office** in the volume mixer to play through the HomePod stereo pair. Do not pick **Office (2)**; that is the pair member, not the leader.
+On Linux, pick **Office** in the volume mixer to play through the HomePod stereo pair. Do not pick **Office (2)**; that is the pair member, not the leader. The installer also clones [Pierre-Aoki Netrunner](https://github.com/Pierre-Aoki/omarchy-netrunner-theme) into `~/.config/omarchy/themes/netrunner` if it is missing (`omarchy theme install`, not Stow).
 
 You can re-run `./install.sh` any time. It is safe if things are already installed. If a file already exists (for example Omarchy already wrote a Herdr config), the script skips that package instead of overwriting it.
 
@@ -27,6 +27,10 @@ You can re-run `./install.sh` any time. It is safe if things are already install
 - `herdr` — Mac Herdr config. Do not Stow this on Omarchy: that machine keeps Omarchy's local Herdr keymap.
 - `hypr` — Omarchy-only Hyprland input overrides (agent/Ghostty touchpad scroll).
 - `pipewire` — Linux only. Turns on AirPlay discovery so HomePods appear as audio outputs.
+
+Netrunner is not a Stow package. On Omarchy, `install.sh` runs `omarchy theme install https://github.com/Pierre-Aoki/omarchy-netrunner-theme` if `~/.config/omarchy/themes/netrunner` is missing. That clone is Omarchy-managed so theme updates stay `omarchy theme update`.
+
+Zen is not a Stow package. On Omarchy, `install.sh` runs `omarchy install browser zen` and `omarchy default browser zen` so new machines get the same keyboard-first browser with vertical tabs and Spaces. Chromium stays installed for Omarchy web apps.
 
 The repository contains configuration only. Runtime state, logs, sockets, credentials, session data, and machine-local backups are not included. `install.sh` is what installs the extra Arch/Homebrew packages a new machine needs.
 

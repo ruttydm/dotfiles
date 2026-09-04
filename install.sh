@@ -70,6 +70,13 @@ case "$os" in
     systemctl --user restart wireplumber pipewire pipewire-pulse
     if need_cmd omarchy; then
       omarchy default terminal ghostty
+      echo "Installing Zen Browser and making it the default"
+      omarchy install browser zen
+      omarchy default browser zen
+      if [[ ! -d "$HOME/.config/omarchy/themes/netrunner" ]]; then
+        echo "Installing Pierre-Aoki Netrunner theme"
+        omarchy theme install https://github.com/Pierre-Aoki/omarchy-netrunner-theme
+      fi
     fi
     ;;
   *)
