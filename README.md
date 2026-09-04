@@ -5,7 +5,8 @@ Public, deliberately small dotfiles managed with [GNU Stow](https://www.gnu.org/
 ## Packages
 
 - `ghostty` manages the macOS Ghostty config at `~/Library/Application Support/com.mitchellh.ghostty/config.ghostty`.
-- `herdr` manages the cross-platform config at `~/.config/herdr/config.toml`.
+- `herdr` manages the Mac Herdr config at `~/.config/herdr/config.toml`. Do not Stow this on Omarchy: that machine keeps Omarchy's local Herdr keymap.
+- `hypr` is Omarchy-only. It sets `scroll_touchpad = 10` on `org.omarchy.agent` windows so Grok/agent TUIs scroll like a normal Foot terminal ([omacom/omarchy#9008](https://github.com/omacom/omarchy/issues/9008)).
 - `pipewire` enables AirPlay/RAOP discovery on Linux at `~/.config/pipewire/pipewire.conf.d/50-raop.conf`, so HomePods and other AirPlay speakers show up as audio outputs.
 
 The repository contains configuration only. Runtime state, logs, sockets, credentials, session data, and machine-local backups are not included. Arch packages required by a Stow package are listed next to the install steps, not installed by Stow itself.
@@ -49,18 +50,18 @@ Install GNU Stow and the AirPlay sender module with `omarchy pkg add stow pipewi
 ```sh
 git clone https://github.com/ruttydm/dotfiles.git ~/Projects/dotfiles
 cd ~/Projects/dotfiles
-stow --target="$HOME" herdr pipewire
+stow --target="$HOME" hypr pipewire
 systemctl --user restart wireplumber pipewire pipewire-pulse
 ```
 
 `pipewire-zeroconf` is the Arch package that actually contains PipeWire's RAOP discover module. Stow only links the config that loads it. After restarting PipeWire, HomePods on the LAN appear as sinks in the volume mixer; pick the stereo-pair leader (here, **Office**) rather than the member speaker.
 
-Do not Stow the `ghostty` package on Linux: it targets Ghostty's macOS Application Support path. On Omarchy, keep `~/.config/ghostty/config` under Omarchy's control because Omarchy generates terminal colors from the selected desktop theme. The shared Herdr configuration still works on Linux; automatic switching occurs when the host terminal reports a light/dark appearance change.
+Do not Stow the `ghostty` package on Linux: it targets Ghostty's macOS Application Support path. On Omarchy, keep `~/.config/ghostty/config` under Omarchy's control because Omarchy generates terminal colors from the selected desktop theme. Do not Stow `herdr` on Omarchy either: Linux Herdr stays on Omarchy's tmux-style keymap and `theme = "terminal"`.
 
 Before the first Stow on an existing machine, preview it:
 
 ```sh
-stow --simulate --verbose=2 --target="$HOME" herdr pipewire
+stow --simulate --verbose=2 --target="$HOME" hypr pipewire
 ```
 
 Stow refuses conflicting real files rather than silently overwriting them. Review and merge or back up an existing config before retrying; avoid `stow --adopt` unless you intentionally want the machine's current file copied into the repository.
@@ -85,7 +86,7 @@ Then sync another machine:
 ```sh
 cd ~/Projects/dotfiles
 git pull --ff-only
-stow --restow --target="$HOME" herdr pipewire   # omit pipewire on macOS
+stow --restow --target="$HOME" hypr pipewire   # omit hypr/pipewire on macOS; omit herdr on Omarchy
 ```
 
 Editing a file usually does not require re-Stowing because the symlink already points into the repository. `--restow` is useful after files are added, removed, or moved. Ghostty reloads its configuration on macOS with `Cmd+Shift+,`; Herdr reloads with `Ctrl+B`, then `Shift+R`.
@@ -101,7 +102,7 @@ stow --delete --target="$HOME" ghostty herdr
 Omarchy / Arch:
 
 ```sh
-stow --delete --target="$HOME" herdr pipewire
+stow --delete --target="$HOME" hypr pipewire
 ```
 
 Deleting Stow links does not delete the tracked files in this repository.
