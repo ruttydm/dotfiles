@@ -1,0 +1,14 @@
+[Unit]
+Description=Orbit Omarchy wallpapers every 15 minutes
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Timer]
+OnActiveSec=15min
+OnUnitActiveSec=15min
+AccuracySec=30s
+Persistent=false
+Unit=omarchy-wallpaper-orbit.service
+
+[Install]
+WantedBy=graphical-session.target

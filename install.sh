@@ -63,11 +63,16 @@ case "$os" in
       echo "This install script only knows Arch/Omarchy on Linux (needs pacman)." >&2
       exit 1
     fi
-    echo "Setting up Linux packages: hypr pipewire ghostty-linux"
+    echo "Setting up Linux packages: hypr pipewire ghostty-linux wallpaper"
     install_linux_packages
-    stow_packages hypr pipewire ghostty-linux || stow_status=$?
+    stow_packages hypr pipewire ghostty-linux wallpaper || stow_status=$?
     echo "Restarting PipeWire so AirPlay speakers (HomePods) show up as outputs"
     systemctl --user restart wireplumber pipewire pipewire-pulse
+    if [[ -f "$HOME/.config/systemd/user/omarchy-wallpaper-orbit.timer" ]]; then
+      echo "Enabling the Omarchy wallpaper orbit timer"
+      systemctl --user daemon-reload
+      systemctl --user enable --now omarchy-wallpaper-orbit.timer
+    fi
     if need_cmd omarchy; then
       omarchy default terminal ghostty
       echo "Installing Zen Browser and making it the default"

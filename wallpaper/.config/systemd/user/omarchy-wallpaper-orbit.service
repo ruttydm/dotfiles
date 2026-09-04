@@ -1,0 +1,12 @@
+[Unit]
+Description=Orbit the current Omarchy wallpaper through a chaotic map
+After=graphical-session.target
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+ConditionPathExists=%h/.local/state/omarchy/current/theme.name
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omarchy-wallpaper-orbit
+Nice=10
+Environment=PATH=/usr/share/omarchy/bin:%h/.local/bin:/usr/local/bin:/usr/bin

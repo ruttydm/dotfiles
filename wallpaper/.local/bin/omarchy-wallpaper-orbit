@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""Rotate the current Omarchy theme wallpaper by an unnecessarily complex map.
+
+Given n stills, pick I in {0, …, n-1} excluding the current image by pushing
+CSPRNG noise through this dynamical system:
+
+    seed    = SHA-256( t_ns ‖ urandom(32) ‖ host ‖ n ‖ current )
+    X_L     = Lorenz RK4 (σ=10, ρ=28, β=8/3) for 64 + (s₄ mod 64) steps
+    L       = logistic map x ↦ 4x(1-x), iterated 96 times on a fold of X_L
+    (u, v)  = Ikeda map, u=0.9, iterated 24 times
+    w       = { φ L + φ² t_ns/2⁶⁴ + y_L }          Weyl / golden rotation
+    (a, b)  = Arnold cat map⁷ (u, v) on the 2-torus
+    x_B     = Blum–Blum–Shub: x ↦ x² (mod pq)
+    ν       = {
+                |erf(x_L / 12)| · τ · sin(π w)
+              + Γ(2 + {z_L})
+              + x_B / M
+              + ζ(3) · a
+              }
+
+    I       = ⌊n · ν⌋  mod n
+    if I is the current still: I ← (I + s) mod n
+        where s is the smallest odd integer ≥ 3 that is coprime to n
+
+Omarchy's own `theme bg next` walks the directory in sort order. This script
+keeps the same still-image discovery, then throws the sequential walk away.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import math
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+
+# Golden-ratio conjugate φ⁻¹ = φ - 1 = (√5 - 1) / 2, and φ⁻² = 1 - φ⁻¹.
+PHI_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
+PHI_CONJ_SQ = 1.0 - PHI_CONJ
+
+# Apéry's constant ζ(3). math has no zeta(); the constant is the point.
+APERY = 1.2020569031595942
+
+# Blum–Blum–Shub moduli, both ≡ 3 (mod 4).
+BBS_P = 10007
+BBS_Q = 10091
+BBS_M = BBS_P * BBS_Q
+
+LORENZ_SIGMA = 10.0
+LORENZ_RHO = 28.0
+LORENZ_BETA = 8.0 / 3.0
+
+IKEDA_U = 0.9
+
+
+def frac(x: float) -> float:
+    return x - math.floor(x)
+
+
+def clamp01(x: float) -> float:
+    if x <= 1e-12:
+        return 1e-12
+    if x >= 1.0 - 1e-12:
+        return 1.0 - 1e-12
+    return x
+
+
+def words32(digest: bytes) -> list[int]:
+    return [int.from_bytes(digest[i : i + 4], "big") for i in range(0, 32, 4)]
+
+
+def lorenz_rk4(
+    x: float, y: float, z: float, dt: float, steps: int
+) -> tuple[float, float, float]:
+    def deriv(px: float, py: float, pz: float) -> tuple[float, float, float]:
+        return (
+            LORENZ_SIGMA * (py - px),
+            px * (LORENZ_RHO - pz) - py,
+            px * py - LORENZ_BETA * pz,
+        )
+
+    for _ in range(steps):
+        k1x, k1y, k1z = deriv(x, y, z)
+        k2x, k2y, k2z = deriv(
+            x + 0.5 * dt * k1x, y + 0.5 * dt * k1y, z + 0.5 * dt * k1z
+        )
+        k3x, k3y, k3z = deriv(
+            x + 0.5 * dt * k2x, y + 0.5 * dt * k2y, z + 0.5 * dt * k2z
+        )
+        k4x, k4y, k4z = deriv(x + dt * k3x, y + dt * k3y, z + dt * k3z)
+        x += (dt / 6.0) * (k1x + 2.0 * k2x + 2.0 * k3x + k4x)
+        y += (dt / 6.0) * (k1y + 2.0 * k2y + 2.0 * k3y + k4y)
+        z += (dt / 6.0) * (k1z + 2.0 * k2z + 2.0 * k3z + k4z)
+    return x, y, z
+
+
+def logistic96(x: float) -> float:
+    x = clamp01(x)
+    for _ in range(96):
+        x = clamp01(4.0 * x * (1.0 - x))
+    return x
+
+
+def ikeda24(x: float, y: float) -> tuple[float, float]:
+    for _ in range(24):
+        t = 0.4 - 6.0 / (1.0 + x * x + y * y)
+        nx = 1.0 + IKEDA_U * (x * math.cos(t) - y * math.sin(t))
+        ny = IKEDA_U * (x * math.sin(t) + y * math.cos(t))
+        x, y = nx, ny
+    return x, y
+
+
+def arnold7(x: float, y: float) -> tuple[float, float]:
+    x, y = frac(x), frac(y)
+    for _ in range(7):
+        x, y = frac(x + y), frac(x + 2.0 * y)
+    return x, y
+
+
+def blum_blum_shub(seed: int, rounds: int = 16) -> int:
+    x = seed % BBS_M
+    if x == 0:
+        x = 3
+    for _ in range(rounds):
+        x = (x * x) % BBS_M
+    return x
+
+
+def coprime_step(n: int) -> int:
+    step = 3
+    while math.gcd(step, n) != 1:
+        step += 2
+    return step
+
+
+def orbit_measure(n: int, current: str, t_ns: int, noise: bytes, host: str) -> tuple[float, int]:
+    digest = hashlib.sha256(
+        t_ns.to_bytes(16, "big")
+        + noise
+        + host.encode()
+        + n.to_bytes(4, "big")
+        + current.encode()
+    ).digest()
+    s = words32(digest)
+
+    x = 0.1 + s[0] / 2**32
+    y = s[1] / 2**32
+    z = 20.0 + 10.0 * (s[2] / 2**32)
+    dt = 0.01 + 0.005 * (s[3] / 2**32)
+    steps = 64 + (s[4] % 64)
+    x, y, z = lorenz_rk4(x, y, z, dt, steps)
+
+    logistic = logistic96(frac(abs(math.tanh(x / 12.0))))
+    ikeda_x, ikeda_y = ikeda24(logistic, frac(abs(y) / 40.0))
+    weyl = frac(PHI_CONJ * logistic + PHI_CONJ_SQ * (t_ns / 2**64) + y / 40.0)
+    arnold_x, _arnold_y = arnold7(ikeda_x, ikeda_y)
+    bbs = blum_blum_shub(int.from_bytes(digest, "big") ^ int(weyl * 2**64))
+
+    nu = frac(
+        abs(math.erf(x / 12.0)) * math.tau * math.sin(math.pi * weyl)
+        + math.gamma(2.0 + frac(abs(z)))
+        + bbs / BBS_M
+        + APERY * arnold_x
+    )
+    index = int(n * nu) % n
+    return nu, index
+
+
+def pick_index(n: int, current_index: int, current: str) -> tuple[float, int]:
+    nu, index = orbit_measure(
+        n=n,
+        current=current,
+        t_ns=time.time_ns(),
+        noise=os.urandom(32),
+        host=socket.gethostname(),
+    )
+    if n > 1 and index == current_index:
+        index = (index + coprime_step(n)) % n
+    return nu, index
+
+
+def theme_name(home: Path) -> str:
+    path = home / ".local/state/omarchy/current/theme.name"
+    return path.read_text(encoding="utf-8").strip()
+
+
+def list_stills(home: Path, name: str) -> list[Path]:
+    dirs = [
+        home / ".config/omarchy/backgrounds" / name,
+        home / ".local/state/omarchy/current/theme/backgrounds",
+    ]
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for directory in dirs:
+        if not directory.is_dir():
+            continue
+        for child in directory.iterdir():
+            if not child.is_file():
+                continue
+            if child.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            resolved = child.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            found.append(resolved)
+    found.sort(key=lambda p: str(p))
+    return found
+
+
+def current_background(home: Path) -> Path | None:
+    link = home / ".local/state/omarchy/current/background"
+    if not link.exists() and not link.is_symlink():
+        return None
+    try:
+        return link.resolve()
+    except OSError:
+        return None
+
+
+def apply_background(path: Path) -> None:
+    subprocess.run(["omarchy-theme-bg-set", str(path)], check=True)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Pick the next Omarchy wallpaper with an overbuilt chaotic map."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the chosen still and do not change the wallpaper.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    home = Path.home()
+
+    try:
+        name = theme_name(home)
+    except FileNotFoundError:
+        print("orbit: no current Omarchy theme", file=sys.stderr)
+        return 0
+
+    stills = list_stills(home, name)
+    if len(stills) == 0:
+        print(f"orbit: no stills for theme {name}", file=sys.stderr)
+        return 0
+    if len(stills) == 1:
+        print(f"orbit: only one still for theme {name}, leaving it")
+        return 0
+
+    current = current_background(home)
+    try:
+        current_index = stills.index(current) if current is not None else -1
+    except ValueError:
+        current_index = -1
+
+    current_label = current.name if current is not None else "none"
+    nu, index = pick_index(len(stills), current_index, current_label)
+    chosen = stills[index]
+
+    print(
+        f"orbit: {chosen.name}  ν={nu:.6f}  skipped={current_label}",
+        flush=True,
+    )
+    if args.dry_run:
+        return 0
+    apply_background(chosen)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except subprocess.CalledProcessError as err:
+        print(f"orbit: omarchy-theme-bg-set failed: {err}", file=sys.stderr)
+        sys.exit(err.returncode or 1)
