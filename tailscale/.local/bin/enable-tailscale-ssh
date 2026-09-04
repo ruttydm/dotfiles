@@ -74,6 +74,9 @@ if tailscale_ssh_hostkeys; then
 else
   echo "Tailscale SSH pref is on, but this node is not advertising host keys."
   echo "Starting OpenSSH on the Tailscale addresses only..."
+  # Tailscale SSH intercepts :22 on the tailnet IP even when it is not
+  # serving, which turns remote OpenSSH into a browser check URL.
+  tailscale set --ssh=false
   as_root ssh-keygen -A >/dev/null
   as_root tee /etc/ssh/sshd_config.d/50-tailscale-only.conf >/dev/null <<CONF
 # Written by enable-tailscale-ssh — SSH only on the Tailscale addresses.
