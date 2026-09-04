@@ -48,10 +48,13 @@
 -- o.window("(Alacritty|kitty|foot)", { scroll_touchpad = 1.5 })
 -- o.window("com.mitchellh.ghostty", { scroll_touchpad = 0.2 })
 
--- Agent windows are Foot with --app-id=org.omarchy.agent, so they miss the
--- default (Alacritty|kitty|foot) scroll_touchpad = 1.5 rule. They also skip
--- foot's scrollback.multiplier (7.0) because the TUI uses the alternate
--- screen. 10 is Hyprland's max and restores parity (omacom/omarchy#9008).
+-- Omarchy's default Ghostty rule is scroll_touchpad = 0.2, which crawls.
+o.window("com.mitchellh.ghostty", { scroll_touchpad = 1.5 })
+
+-- Agent windows use --app-id=org.omarchy.agent, so they miss the
+-- (Alacritty|kitty|foot) scroll_touchpad = 1.5 rule. Fullscreen TUIs also skip
+-- the terminal's own scrollback multiplier. 10 is Hyprland's max and restores
+-- parity (omacom/omarchy#9008).
 o.window("org.omarchy.agent", { scroll_touchpad = 10 })
 
 -- Enable touchpad gestures for changing workspaces.

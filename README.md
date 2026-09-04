@@ -14,7 +14,7 @@ git clone https://github.com/ruttydm/dotfiles.git ~/Projects/dotfiles
 | Machine | What the script installs | What it links |
 |---|---|---|
 | macOS | `stow` (Homebrew) | `ghostty`, `herdr` |
-| Omarchy / Arch | `stow`, `pipewire-zeroconf` | `herdr`, `pipewire` |
+| Omarchy / Arch | `stow`, `pipewire-zeroconf`, `ghostty` | `hypr`, `pipewire`, `ghostty-linux` |
 
 On Linux, pick **Office** in the volume mixer to play through the HomePod stereo pair. Do not pick **Office (2)**; that is the pair member, not the leader.
 
@@ -22,8 +22,10 @@ You can re-run `./install.sh` any time. It is safe if things are already install
 
 ## Packages
 
-- `ghostty` — macOS Ghostty config. Follows macOS Automatic appearance (Vesper in Dark, Gruvbox Light in Light). Do not Stow this on Linux: Omarchy owns `~/.config/ghostty/config` so it can theme the terminal.
-- `herdr` — shared Herdr config. Follows the terminal's light/dark appearance.
+- `ghostty` — macOS Ghostty config. Follows macOS Automatic appearance (Vesper in Dark, Gruvbox Light in Light). Do not Stow this on Linux.
+- `ghostty-linux` — Omarchy Ghostty config at `~/.config/ghostty/config`. Includes Omarchy theme colors so `omarchy theme set` still works. Click-to-open links work (unlike Foot).
+- `herdr` — Mac Herdr config. Do not Stow this on Omarchy: that machine keeps Omarchy's local Herdr keymap.
+- `hypr` — Omarchy-only Hyprland input overrides (agent/Ghostty touchpad scroll).
 - `pipewire` — Linux only. Turns on AirPlay discovery so HomePods appear as audio outputs.
 
 The repository contains configuration only. Runtime state, logs, sockets, credentials, session data, and machine-local backups are not included. `install.sh` is what installs the extra Arch/Homebrew packages a new machine needs.
@@ -73,16 +75,16 @@ Preview without changing anything:
 
 ```sh
 cd ~/Projects/dotfiles
-stow --simulate --verbose=2 --target="$HOME" herdr pipewire   # Linux
-stow --simulate --verbose=2 --target="$HOME" ghostty herdr    # macOS
+stow --simulate --verbose=2 --target="$HOME" hypr pipewire ghostty-linux   # Linux
+stow --simulate --verbose=2 --target="$HOME" ghostty herdr                 # macOS
 ```
 
 ## Remove links
 
 ```sh
 cd ~/Projects/dotfiles
-stow --delete --target="$HOME" ghostty herdr     # macOS
-stow --delete --target="$HOME" herdr pipewire    # Omarchy / Arch
+stow --delete --target="$HOME" ghostty herdr                      # macOS
+stow --delete --target="$HOME" hypr pipewire ghostty-linux        # Omarchy / Arch
 ```
 
 Deleting Stow links does not delete the tracked files in this repository.

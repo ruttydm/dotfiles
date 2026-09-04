@@ -26,7 +26,7 @@ stow_packages() {
 }
 
 install_linux_packages() {
-  local pkgs=(stow pipewire-zeroconf) missing=() pkg
+  local pkgs=(stow pipewire-zeroconf ghostty) missing=() pkg
   for pkg in "${pkgs[@]}"; do
     if ! pacman -Q "$pkg" >/dev/null 2>&1; then
       missing+=("$pkg")
@@ -63,11 +63,14 @@ case "$os" in
       echo "This install script only knows Arch/Omarchy on Linux (needs pacman)." >&2
       exit 1
     fi
-    echo "Setting up Linux packages: herdr pipewire"
+    echo "Setting up Linux packages: hypr pipewire ghostty-linux"
     install_linux_packages
-    stow_packages herdr pipewire || stow_status=$?
+    stow_packages hypr pipewire ghostty-linux || stow_status=$?
     echo "Restarting PipeWire so AirPlay speakers (HomePods) show up as outputs"
     systemctl --user restart wireplumber pipewire pipewire-pulse
+    if need_cmd omarchy; then
+      omarchy default terminal ghostty
+    fi
     ;;
   *)
     echo "Unsupported OS: $os" >&2
