@@ -44,6 +44,34 @@ install_linux_packages() {
   fi
 }
 
+# Third-party Omarchy plugins are git clones under ~/.config/omarchy/plugins,
+# same as extra themes. Do not Stow them.
+ensure_omarchy_git_plugin() {
+  local id="$1" url="$2"
+  if [[ ! -d "$HOME/.config/omarchy/plugins/$id" ]]; then
+    echo "Installing Omarchy plugin $id"
+    omarchy plugin add "$url" --enable --yes
+  fi
+}
+
+ensure_which_key_integration() {
+  local dir="$HOME/.config/omarchy/plugins/huacnlee.which-key"
+  local status
+  [[ -x "$dir/scripts/integration-status" && -x "$dir/scripts/enable-integration" ]] || return 0
+  status="$("$dir/scripts/integration-status" || true)"
+  if [[ "$status" != "enabled" ]]; then
+    echo "Enabling which-key Super-hold integration"
+    "$dir/scripts/enable-integration"
+  fi
+}
+
+install_omarchy_extra_plugins() {
+  ensure_omarchy_git_plugin huacnlee.which-key https://github.com/huacnlee/omarchy-which-key.git
+  omarchy plugin enable huacnlee.which-key --section right --after omarchy.tray
+  ensure_which_key_integration
+  omarchy plugin enable omarchy.tailscale --section right --after huacnlee.which-key
+}
+
 stow_status=0
 
 case "$os" in
@@ -88,6 +116,8 @@ case "$os" in
         echo "Installing Pierre-Aoki Netrunner theme"
         omarchy theme install https://github.com/Pierre-Aoki/omarchy-netrunner-theme
       fi
+      echo "Installing extra Omarchy plugins"
+      install_omarchy_extra_plugins
     fi
     ;;
   *)
