@@ -70,6 +70,8 @@ install_omarchy_extra_plugins() {
   omarchy plugin enable huacnlee.which-key --section right --after omarchy.tray
   ensure_which_key_integration
   omarchy plugin enable omarchy.tailscale --section right --after huacnlee.which-key
+  ensure_omarchy_git_plugin njpatel.omaherdr https://github.com/njpatel/omaherdr.git
+  omarchy plugin enable njpatel.omaherdr --section right --after omarchy.tailscale
 }
 
 stow_status=0

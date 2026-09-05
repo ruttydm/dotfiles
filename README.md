@@ -32,7 +32,7 @@ You can re-run `./install.sh` any time. It is safe if things are already install
 
 Netrunner is not a Stow package. On Omarchy, `install.sh` runs `omarchy theme install https://github.com/Pierre-Aoki/omarchy-netrunner-theme` if `~/.config/omarchy/themes/netrunner` is missing. That clone is Omarchy-managed so theme updates stay `omarchy theme update`.
 
-Omarchy plugins are not Stow packages either. On Omarchy, `install.sh` clones [Which Key](https://github.com/huacnlee/omarchy-which-key) with `omarchy plugin add --enable --yes` if it is missing, turns on Super-hold integration, places the widget after the tray, and enables the first-party Tailscale bar widget after it. Plugin updates stay `omarchy plugin update`.
+Omarchy plugins are not Stow packages either. On Omarchy, `install.sh` clones [Which Key](https://github.com/huacnlee/omarchy-which-key) and [Omaherdr](https://github.com/njpatel/omaherdr) with `omarchy plugin add --enable --yes` if they are missing, turns on Which Key Super-hold integration, places Which Key after the tray, the first-party Tailscale bar widget after that, and Omaherdr after Tailscale. Plugin updates stay `omarchy plugin update`.
 
 Zen is not a Stow package. On Omarchy, `install.sh` runs `omarchy install browser zen` and `omarchy default browser zen` so new machines get the same keyboard-first browser with vertical tabs and Spaces. Chromium stays installed for Omarchy web apps.
 
