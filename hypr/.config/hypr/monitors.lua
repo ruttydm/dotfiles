@@ -2,7 +2,8 @@
 -- List current monitors and supported resolutions with: hyprctl monitors all
 --
 -- Docked layout (physical left → right):
---   HDMI Philips 248E9Q  |  USB-C Dell P2720DC  |  laptop
+--   HDMI Philips 248E9Q  |  USB-C Dell P2720DC (primary)  |  laptop
+-- Coordinate origin is the Dell so it is the XWayland/GTK primary.
 -- Externals stay at scale 1; the 14" 1920x1200 panel stays at 1.25.
 
 hl.env("GDK_SCALE", "1")
@@ -20,24 +21,25 @@ end
 local hdmi = connected("HDMI-A-1")
 local dell = connected("DP-2")
 
--- HDMI left (Philips 1920x1080).
-hl.monitor({ output = "HDMI-A-1", mode = "preferred", position = "0x0", scale = 1 })
-
--- USB-C Dell middle (2560x1440), or left if HDMI is unplugged.
-if hdmi then
-  hl.monitor({ output = "DP-2", mode = "preferred", position = "1920x0", scale = 1 })
+if dell then
+  -- Dell is the origin (primary). HDMI sits to its left.
+  hl.monitor({ output = "DP-2", mode = "preferred", position = "0x0", scale = 1 })
+  hl.monitor({
+    output = "HDMI-A-1",
+    mode = "preferred",
+    position = hdmi and "-1920x0" or "0x0",
+    scale = 1,
+  })
 else
   hl.monitor({ output = "DP-2", mode = "preferred", position = "0x0", scale = 1 })
+  hl.monitor({ output = "HDMI-A-1", mode = "preferred", position = "0x0", scale = 1 })
 end
 
--- Laptop right. Logical width at 1.25 is 1536.
 local laptop_x = 0
-if hdmi and dell then
-  laptop_x = 1920 + 2560
+if dell then
+  laptop_x = 2560
 elseif hdmi then
   laptop_x = 1920
-elseif dell then
-  laptop_x = 2560
 end
 hl.monitor({
   output = "eDP-1",
@@ -45,3 +47,10 @@ hl.monitor({
   position = laptop_x .. "x0",
   scale = 1.25,
 })
+
+if dell then
+  hl.config({ cursor = { default_monitor = "DP-2" } })
+  hl.workspace_rule({ workspace = "1", monitor = "DP-2", default = true })
+else
+  hl.config({ cursor = { default_monitor = "eDP-1" } })
+end
