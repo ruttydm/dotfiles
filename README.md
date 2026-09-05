@@ -25,7 +25,7 @@ You can re-run `./install.sh` any time. It is safe if things are already install
 - `ghostty` — macOS Ghostty config. Follows macOS Automatic appearance (Vesper in Dark, Gruvbox Light in Light). Do not Stow this on Linux.
 - `ghostty-linux` — Omarchy Ghostty config at `~/.config/ghostty/config`. Includes Omarchy theme colors so `omarchy theme set` still works. Click-to-open links work (unlike Foot).
 - `herdr` — Mac Herdr config. Do not Stow this on Omarchy: that machine keeps Omarchy's local Herdr keymap.
-- `hypr` — Omarchy-only Hyprland input overrides (agent/Ghostty touchpad scroll).
+- `hypr` — Omarchy-only Hyprland overrides: agent/Ghostty touchpad scroll, plus the X1 Carbon dock layout (HDMI Philips left, USB-C Dell middle, laptop right at scale 1.25).
 - `pipewire` — Linux only. Turns on AirPlay discovery so HomePods appear as audio outputs.
 - `wallpaper` — Linux only. A user systemd timer that rotates the current Omarchy theme's still wallpapers every 15 minutes. The next image is chosen by pushing CSPRNG noise through Lorenz, logistic, Ikeda, Weyl, Arnold, and Blum–Blum–Shub maps, then taking the orbit modulo the wallpaper count (skipping the current still). Preview with `omarchy-wallpaper-orbit --dry-run`. Stop with `systemctl --user disable --now omarchy-wallpaper-orbit.timer`.
 - `tailscale` — Linux only. Turns on Tailscale SSH so other devices on the tailnet can `ssh` in, and opens TCP/22 on `tailscale0` only (not public Wi-Fi). `install.sh` runs `enable-tailscale-ssh` when Tailscale is already logged in. A post-boot hook re-asserts `tailscale set --ssh`. Re-run with `enable-tailscale-ssh`.
