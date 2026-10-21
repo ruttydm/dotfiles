@@ -93,9 +93,9 @@ case "$os" in
       echo "This install script only knows Arch/Omarchy on Linux (needs pacman)." >&2
       exit 1
     fi
-    echo "Setting up Linux packages: hypr pipewire ghostty-linux wallpaper tailscale"
+    echo "Setting up Linux packages: hypr pipewire ghostty-linux wallpaper tailscale omarchy"
     install_linux_packages
-    stow_packages hypr pipewire ghostty-linux wallpaper tailscale || stow_status=$?
+    stow_packages hypr pipewire ghostty-linux wallpaper tailscale omarchy || stow_status=$?
     echo "Restarting PipeWire so AirPlay speakers (HomePods) show up as outputs"
     systemctl --user restart wireplumber pipewire pipewire-pulse
     if [[ -f "$HOME/.config/systemd/user/omarchy-wallpaper-orbit.timer" ]]; then

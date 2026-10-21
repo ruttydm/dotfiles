@@ -14,7 +14,7 @@ git clone https://github.com/ruttydm/dotfiles.git ~/Projects/dotfiles
 | Machine | What the script installs | What it links |
 |---|---|---|
 | macOS | `stow` (Homebrew) | `ghostty`, `herdr` |
-| Omarchy / Arch | `stow`, `pipewire-zeroconf`, `ghostty`, Zen Browser | `hypr`, `pipewire`, `ghostty-linux`, `wallpaper`, `tailscale` |
+| Omarchy / Arch | `stow`, `pipewire-zeroconf`, `ghostty`, Zen Browser | `hypr`, `pipewire`, `ghostty-linux`, `wallpaper`, `tailscale`, `omarchy` |
 
 On Linux, pick **Office** in the volume mixer to play through the HomePod stereo pair. Do not pick **Office (2)**; that is the pair member, not the leader. The installer also clones [Pierre-Aoki Netrunner](https://github.com/Pierre-Aoki/omarchy-netrunner-theme) into `~/.config/omarchy/themes/netrunner` if it is missing (`omarchy theme install`, not Stow).
 
@@ -29,10 +29,11 @@ You can re-run `./install.sh` any time. It is safe if things are already install
 - `pipewire` — Linux only. Turns on AirPlay discovery so HomePods appear as audio outputs.
 - `wallpaper` — Linux only. A user systemd timer that rotates the current Omarchy theme's still wallpapers every 15 minutes. The next image is chosen by pushing CSPRNG noise through Lorenz, logistic, Ikeda, Weyl, Arnold, and Blum–Blum–Shub maps, then taking the orbit modulo the wallpaper count (skipping the current still). Preview with `omarchy-wallpaper-orbit --dry-run`. Stop with `systemctl --user disable --now omarchy-wallpaper-orbit.timer`.
 - `tailscale` — Linux only. Turns on Tailscale SSH so other devices on the tailnet can `ssh` in, and opens TCP/22 on `tailscale0` only (not public Wi-Fi). `install.sh` runs `enable-tailscale-ssh` when Tailscale is already logged in. A post-boot hook re-asserts `tailscale set --ssh`. Re-run with `enable-tailscale-ssh`.
+- `omarchy` — Linux only. Status bar: battery percentage next to the icon, and a clock with seconds (`Wednesday HH:mm:ss`). The clock is a local clone of the built-in widget (`ruttydm.clock`) because the stock clock only updates once a minute. Right-click the battery still toggles the percentage. Right-click the clock still cycles formats, which drops the seconds until you cycle back.
 
 Netrunner is not a Stow package. On Omarchy, `install.sh` runs `omarchy theme install https://github.com/Pierre-Aoki/omarchy-netrunner-theme` if `~/.config/omarchy/themes/netrunner` is missing. That clone is Omarchy-managed so theme updates stay `omarchy theme update`.
 
-Omarchy plugins are not Stow packages either. On Omarchy, `install.sh` clones [Which Key](https://github.com/huacnlee/omarchy-which-key) and [Omaherdr](https://github.com/njpatel/omaherdr) with `omarchy plugin add --enable --yes` if they are missing, turns on Which Key Super-hold integration, places Which Key after the tray, the first-party Tailscale bar widget after that, and Omaherdr after Tailscale. Plugin updates stay `omarchy plugin update`.
+Third-party Omarchy plugins are not Stow packages. On Omarchy, `install.sh` clones [Which Key](https://github.com/huacnlee/omarchy-which-key) and [Omaherdr](https://github.com/njpatel/omaherdr) with `omarchy plugin add --enable --yes` if they are missing, turns on Which Key Super-hold integration, places Which Key after the tray, the first-party Tailscale bar widget after that, and Omaherdr after Tailscale. Plugin updates stay `omarchy plugin update`. The seconds clock is the exception: `omarchy` stows a local clone of the built-in clock, because that widget has to tick every second. If Omarchy has already written `~/.config/omarchy/shell.json`, move that file aside before Stow can link this one.
 
 Zen is not a Stow package. On Omarchy, `install.sh` runs `omarchy install browser zen` and `omarchy default browser zen` so new machines get the same keyboard-first browser with vertical tabs and Spaces. Chromium stays installed for Omarchy web apps.
 
@@ -83,7 +84,7 @@ Preview without changing anything:
 
 ```sh
 cd ~/Projects/dotfiles
-stow --simulate --verbose=2 --target="$HOME" hypr pipewire ghostty-linux wallpaper tailscale   # Linux
+stow --simulate --verbose=2 --target="$HOME" hypr pipewire ghostty-linux wallpaper tailscale omarchy   # Linux
 stow --simulate --verbose=2 --target="$HOME" ghostty herdr                 # macOS
 ```
 
@@ -92,7 +93,7 @@ stow --simulate --verbose=2 --target="$HOME" ghostty herdr                 # mac
 ```sh
 cd ~/Projects/dotfiles
 stow --delete --target="$HOME" ghostty herdr                      # macOS
-stow --delete --target="$HOME" hypr pipewire ghostty-linux wallpaper tailscale  # Omarchy / Arch
+stow --delete --target="$HOME" hypr pipewire ghostty-linux wallpaper tailscale omarchy  # Omarchy / Arch
 ```
 
 Deleting Stow links does not delete the tracked files in this repository.
