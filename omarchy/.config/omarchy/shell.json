@@ -51,7 +51,8 @@
           "id": "omarchy.tailscale"
         },
         {
-          "id": "njpatel.omaherdr"
+          "id": "njpatel.omaherdr",
+          "barIcon": "dashboard"
         },
         {
           "id": "omarchy.agents"
@@ -67,6 +68,14 @@
         },
         {
           "id": "omarchy.monitor"
+        },
+        {
+          "id": "resources",
+          "type": "command",
+          "exec": "~/.config/omarchy/bar/scripts/resources",
+          "interval": 2,
+          "tooltip": "CPU and memory",
+          "onClick": "omarchy-launch-or-focus-tui btop"
         },
         {
           "id": "omarchy.power",
