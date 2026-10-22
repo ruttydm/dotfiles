@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Save a GLM Coding Plan key for the Agents panel. Never prints the key.
+
+The key stays in ~/.config/omarchy/agent-usage-plus/collectors.json (mode 600).
+That file is not part of the dotfiles repo. An existing file is left alone.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+DEST = Path.home() / ".config" / "omarchy" / "agent-usage-plus" / "collectors.json"
+QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+ENV_NAMES = (
+    "ZAI_API_KEY",
+    "Z_AI_API_KEY",
+    "GLM_API_KEY",
+    "ZHIPU_API_KEY",
+    "ZHIPUAI_API_KEY",
+    "BIGMODEL_API_KEY",
+)
+# First hit that the quota endpoint accepts wins. These are the project env
+# files that already point at the Z.AI coding endpoint on this machine.
+FILE_CANDIDATES = (
+    (Path.home() / "Projects" / "kosmokrator" / ".env", ("ZAI_API_KEY",)),
+    (Path.home() / "Projects" / "opencompany" / ".env", ("GLM_API_KEY",)),
+)
+
+
+def existing_key() -> str:
+    if not DEST.is_file():
+        return ""
+    try:
+        data = json.loads(DEST.read_text())
+    except (OSError, json.JSONDecodeError):
+        return ""
+    zai = data.get("zai") if isinstance(data, dict) else None
+    key = zai.get("apiKey") if isinstance(zai, dict) else ""
+    return key.strip() if isinstance(key, str) else ""
+
+
+def parse_env_file(path: Path, names: tuple[str, ...]) -> list[tuple[str, str]]:
+    if not path.is_file():
+        return []
+    wanted = set(names)
+    found: list[tuple[str, str]] = []
+    for raw in path.read_text(errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        value = value.strip().strip('"').strip("'")
+        if name in wanted and value:
+            found.append((name, value))
+    return found
+
+
+def candidates() -> list[tuple[str, str]]:
+    ordered: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(label: str, key: str) -> None:
+        key = key.strip()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        ordered.append((label, key))
+
+    for name in ENV_NAMES:
+        value = os.environ.get(name, "")
+        if value:
+            add(f"environment {name}", value)
+    for path, names in FILE_CANDIDATES:
+        for name, value in parse_env_file(path, names):
+            add(f"{path} ({name})", value)
+    return ordered
+
+
+def quota_accepts(key: str) -> bool:
+    request = urllib.request.Request(
+        QUOTA_URL,
+        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read(200_000))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("success") is True
+        and payload.get("code") in (200, "200")
+        and isinstance((payload.get("data") or {}).get("limits"), list)
+    )
+
+
+def write_config(key: str) -> None:
+    DEST.parent.mkdir(parents=True, exist_ok=True)
+    temporary = DEST.with_suffix(".json.tmp")
+    payload = {"zai": {"apiKey": key, "region": "global", "usageScope": "personal"}}
+    temporary.write_text(json.dumps(payload, indent=2) + "\n")
+    os.chmod(temporary, 0o600)
+    temporary.replace(DEST)
+    os.chmod(DEST, 0o600)
+
+
+def main() -> int:
+    current = existing_key()
+    if current:
+        if DEST.stat().st_mode & 0o077:
+            os.chmod(DEST, 0o600)
+            print(f"Tightened permissions on {DEST}")
+        else:
+            print(f"GLM Coding Plan key already configured in {DEST}")
+        return 0
+
+    found = candidates()
+    if not found:
+        print(
+            "No GLM Coding Plan key found. Set ZAI_API_KEY, or add it to "
+            "~/Projects/kosmokrator/.env or ~/Projects/opencompany/.env, then re-run.",
+            file=sys.stderr,
+        )
+        return 0
+
+    for label, key in found:
+        if quota_accepts(key):
+            write_config(key)
+            print(f"Saved GLM Coding Plan key from {label} to {DEST}")
+            return 0
+
+    print(
+        "Found GLM key material, but the Z.AI quota endpoint rejected every candidate. "
+        f"Nothing was written to {DEST}.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

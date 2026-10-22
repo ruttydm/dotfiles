@@ -57,7 +57,12 @@
           "barIcon": "dashboard"
         },
         {
-          "id": "omarchy.agents"
+          "id": "omarchy.agents",
+          "providers": {
+            "claude": { "enabled": true },
+            "codex": { "enabled": true },
+            "fireworks": { "enabled": false }
+          }
         },
         {
           "id": "omarchy.bluetooth"
@@ -86,5 +91,9 @@
       ]
     }
   },
-  "plugins": []
+  "plugins": [
+    {
+      "id": "omarchy-spacexai-usage"
+    }
+  ]
 }

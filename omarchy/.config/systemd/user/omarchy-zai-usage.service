@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh the GLM Coding Plan quota for the Omarchy Agents panel
+ConditionPathExists=%h/.local/share/agent-usage-plus-collectors/bin/agent-usage-plus-collectors
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/agent-usage-plus-collectors/bin/agent-usage-plus-collectors update zai
+Nice=10

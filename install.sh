@@ -72,6 +72,39 @@ install_omarchy_extra_plugins() {
   omarchy plugin enable omarchy.tailscale --section right --after huacnlee.which-key
   ensure_omarchy_git_plugin njpatel.omaherdr https://github.com/njpatel/omaherdr.git
   omarchy plugin enable njpatel.omaherdr --section right --after omarchy.tailscale
+  # Service plugin: Grok and Cursor tabs in the stock Agents panel. shell.json
+  # lists it, so do not --enable here (that rewrites the whole bar config).
+  if [[ ! -d "$HOME/.config/omarchy/plugins/omarchy-spacexai-usage" ]]; then
+    echo "Installing Grok and Cursor usage collector"
+    omarchy plugin add https://github.com/jexmarc/omarchy-spacexai-usage.git --yes
+  fi
+  ensure_glm_usage_collector
+}
+
+# Writes zai.json only. The stock updater never sees collectors outside
+# /usr/share/omarchy/bin, and the full Agent Usage Plus runner would also
+# overwrite the Cursor record owned by omarchy-spacexai-usage.
+ensure_glm_usage_collector() {
+  local src="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles/agent-usage-plus"
+  local bin="$HOME/.local/share/agent-usage-plus-collectors/bin/agent-usage-plus-collectors"
+  if [[ ! -x "$bin" ]]; then
+    echo "Installing GLM Coding Plan usage collector"
+    mkdir -p "$(dirname "$src")"
+    if [[ ! -d "$src/.git" ]]; then
+      git clone --depth 1 https://github.com/viganogabriele/agent-usage-plus.git "$src"
+    fi
+    "$src/collectors/install.sh"
+  fi
+  if [[ -x "$HOME/.local/bin/omarchy-zai-usage-auth" ]]; then
+    "$HOME/.local/bin/omarchy-zai-usage-auth" || true
+  fi
+  if [[ -f "$HOME/.config/systemd/user/omarchy-zai-usage.timer" ]]; then
+    systemctl --user daemon-reload
+    systemctl --user enable --now omarchy-zai-usage.timer
+  fi
+  if [[ -x "$bin" ]]; then
+    "$bin" update zai || echo "GLM quota refresh failed; the timer will retry." >&2
+  fi
 }
 
 # The clock follows the system zone. This dispatcher re-points that zone when
