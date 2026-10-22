@@ -9,7 +9,8 @@ import "Model.js" as Model
 //
 // Left click reveals the calendar — asking "what is the date?" is what a
 // click on a clock means — right click walks the common label formats, and
-// middle click opens the timezone picker.
+// middle click opens the timezone picker. When the system zone is not the
+// home zone, the label also shows that home clock so travel stays comparable.
 BarWidget {
   id: root
   moduleName: "omarchy.clock"
@@ -28,12 +29,78 @@ BarWidget {
   // What the bar shows is what shell.json stores, so a cycled format is the
   // format from then on rather than something that reverts on restart.
   readonly property string activeFormat: configuredFormat
-  readonly property string displayText: formatted(displayDate)
+
+  // Home zone beside local time. An empty compareTimezone turns it off.
+  // The suffix stays off while that zone is already the system zone.
+  readonly property string compareTimezone: normalizedZone(setting("compareTimezone", "Europe/Brussels"))
+  readonly property string compareLabel: {
+    var label = String(setting("compareLabel", "BRU") || "")
+    return label !== "" ? label : "BRU"
+  }
+  property string localZone: ""
+  property int compareOffsetMinutes: 0
+  property bool zoneReady: false
+  property bool componentReady: false
+
+  readonly property bool showCompare: zoneReady && compareTimezone !== "" && localZone !== compareTimezone
+  readonly property string compareClock: Model.formatOffsetClock(displayDate, compareOffsetMinutes, false)
+  readonly property string compareClockFull: Model.formatOffsetClock(displayDate, compareOffsetMinutes, true)
+  readonly property string compareRelation: Model.relativeOffsetLabel(-displayDate.getTimezoneOffset(), compareOffsetMinutes)
+  readonly property string displayText: {
+    var base = formatted(displayDate)
+    if (!showCompare || compareClock === "") return base
+    if (vertical) return base + "\n—\n" + compareLabel + "\n" + compareClock
+    return base + "  ·  " + compareLabel + " " + compareClock
+  }
+  readonly property string clockTooltip: {
+    if (!zoneReady || localZone === "") return ""
+    var local = Model.zoneCity(localZone) + " " + Qt.formatDateTime(displayDate, "HH:mm")
+    if (!showCompare) return local
+    return local + "  ·  Brussels " + compareClock + "  ·  " + compareRelation
+  }
   readonly property var verticalLines: displayText.split("\n")
+
+  function normalizedZone(zone) {
+    if (zone === "") return ""
+    var text = String(zone == null ? "" : zone)
+    if (/^[A-Za-z0-9_+-]+(\/[A-Za-z0-9_+-]+)*$/.test(text)) return text
+    return "Europe/Brussels"
+  }
 
   function refresh() {
     displayDate = new Date()
+    probeZone()
     if (panelLoader.item && panelLoader.item.refresh) panelLoader.item.refresh()
+  }
+
+  // `date +%z` is the zone's current offset, DST included. Re-read it on a
+  // timer so a transition is not stuck until the next login.
+  function probeZone() {
+    if (!compareTimezone) {
+      zoneReady = false
+      localZone = ""
+      return
+    }
+    if (!zoneProbe || zoneProbe.running) return
+    var zone = compareTimezone
+    // zone is already restricted to an IANA name, so it is safe to inline.
+    var script = "z=" + zone
+      + "; zonefile=$(readlink -f /etc/localtime)"
+      + "; zonefile=${zonefile#/usr/share/zoneinfo/}"
+      + "; off=$(TZ=\"$z\" date +%z)"
+      + "; printf '%s %s\\n' \"$zonefile\" \"$off\""
+    zoneProbe.command = ["bash", "-c", script]
+    zoneProbe.running = true
+  }
+
+  function applyZoneProbe(text) {
+    var parts = String(text || "").trim().split(/\s+/)
+    if (parts.length < 2) return
+    var minutes = Model.offsetMinutes(parts[1])
+    if (minutes === null) return
+    localZone = parts[0]
+    compareOffsetMinutes = minutes
+    zoneReady = true
   }
 
   function cycleFormat() {
@@ -107,7 +174,29 @@ BarWidget {
   implicitHeight: button.implicitHeight
 
   onBarChanged: injectPanel()
-  onSettingsChanged: injectPanel()
+  onSettingsChanged: {
+    injectPanel()
+    if (componentReady) probeZone()
+  }
+  Component.onCompleted: {
+    componentReady = true
+    probeZone()
+  }
+
+  Process {
+    id: zoneProbe
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyZoneProbe(text)
+    }
+  }
+
+  Timer {
+    interval: 5 * 60 * 1000
+    running: true
+    repeat: true
+    onTriggered: root.probeZone()
+  }
 
   SystemClock {
     id: clock
@@ -145,6 +234,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: root.vertical ? "" : root.displayText
+    tooltipText: root.clockTooltip
     labelVisible: !root.vertical
     hasVisualContent: root.vertical ? root.verticalLines.length > 0 : text !== ""
     fixedHeight: root.vertical ? root.verticalLines.length * Style.bar.iconSlot : -1

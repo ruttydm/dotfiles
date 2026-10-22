@@ -35,6 +35,13 @@ Panel {
   property date today: new Date()
   readonly property string todayKey: Model.keyForDate(today)
 
+  // Filled by the bar widget once it has read /etc/localtime and the home zone.
+  readonly property bool worldClockReady: hostWidget && hostWidget.zoneReady === true && String(hostWidget.localZone || "") !== ""
+  readonly property string worldLocalTime: Qt.formatDateTime(hostWidget && hostWidget.displayDate ? hostWidget.displayDate : today, "HH:mm:ss")
+  readonly property string worldLocalCity: hostWidget ? Model.zoneCity(hostWidget.localZone) : ""
+  readonly property string worldCompareTime: hostWidget ? String(hostWidget.compareClockFull || "") : ""
+  readonly property string worldCompareRelation: hostWidget ? String(hostWidget.compareRelation || "") : ""
+
   // The month on screen. Stepping moves this and nothing else: the grid is
   // a read-out, not a picker, so there is no per-day cursor to keep in sync.
   property int viewYear: today.getFullYear()
@@ -152,14 +159,17 @@ Panel {
   // entry when the label format is cycled, so it has to be kept in step or
   // it would write this key straight back out from a stale copy.
   function persistSettings(values) {
-    var entry = { id: root.moduleName }
+    // The panel's own moduleName is the stock id. The bar slot is the clone,
+    // and that is the shell.json entry these keys belong to.
+    var entryId = root.hostWidget && root.hostWidget.moduleName ? root.hostWidget.moduleName : root.moduleName
+    var entry = { id: entryId }
     for (var existing in root.settings) if (existing !== "id") entry[existing] = root.settings[existing]
     for (var key in values) entry[key] = values[key]
 
     root.settings = entry
     if (root.hostWidget && "settings" in root.hostWidget) root.hostWidget.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
-      root.bar.shell.updateEntryInline(root.moduleName, entry)
+      root.bar.shell.updateEntryInline(entryId, entry)
   }
 
   function setWeekStart(day) {
@@ -340,6 +350,84 @@ Panel {
                 visible: heroMouse.containsMouse
                 text: "Back to today"
                 fontFamily: root.contentFontFamily
+              }
+            }
+          }
+
+          // ---- Local time against the home clock. Same numbers the bar
+          //      suffix uses, with the gap spelled out.
+          Item {
+            visible: root.worldClockReady
+            width: parent.width
+            implicitHeight: visible ? worldRow.implicitHeight : 0
+            height: implicitHeight
+
+            Row {
+              id: worldRow
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: Math.min(parent.width, gridColumn.width)
+              spacing: Style.space(18)
+
+              Column {
+                width: (worldRow.width - worldRow.spacing) / 2
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "LOCAL"
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.letterSpacing: 1
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: root.worldLocalTime
+                  color: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.display
+                  font.bold: true
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: root.worldLocalCity
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              Column {
+                width: (worldRow.width - worldRow.spacing) / 2
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "BRUSSELS"
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.letterSpacing: 1
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: root.worldCompareTime
+                  color: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.display
+                  font.bold: true
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: root.worldCompareRelation
+                  color: Qt.darker(root.contentForeground, 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
               }
             }
           }

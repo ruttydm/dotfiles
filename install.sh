@@ -74,6 +74,32 @@ install_omarchy_extra_plugins() {
   omarchy plugin enable njpatel.omaherdr --section right --after omarchy.tailscale
 }
 
+# The clock follows the system zone. This dispatcher re-points that zone when
+# a physical network comes up, so travel does not leave the bar on the last city.
+install_timezone_autoupdate() {
+  local bin="$HOME/.local/bin/omarchy-timezone-auto"
+  local dest=/etc/NetworkManager/dispatcher.d/99-omarchy-timezone
+  local tmp
+  [[ -x "$bin" ]] || return 0
+  tmp="$(mktemp)"
+  {
+    echo '#!/bin/bash'
+    printf 'export OMARCHY_TZ_USER=%q\n' "$USER"
+    printf 'exec %q "$@"\n' "$bin"
+  } >"$tmp"
+  if [[ -f "$dest" ]] && cmp -s "$tmp" "$dest"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  echo "Installing NetworkManager timezone dispatcher"
+  if sudo install -m 755 "$tmp" "$dest"; then
+    rm -f "$tmp"
+  else
+    rm -f "$tmp"
+    echo "Could not install $dest. Re-run ./install.sh once sudo is available." >&2
+  fi
+}
+
 stow_status=0
 
 case "$os" in
@@ -96,6 +122,7 @@ case "$os" in
     echo "Setting up Linux packages: hypr pipewire ghostty-linux wallpaper tailscale omarchy"
     install_linux_packages
     stow_packages hypr pipewire ghostty-linux wallpaper tailscale omarchy || stow_status=$?
+    install_timezone_autoupdate
     echo "Restarting PipeWire so AirPlay speakers (HomePods) show up as outputs"
     systemctl --user restart wireplumber pipewire pipewire-pulse
     if [[ -f "$HOME/.config/systemd/user/omarchy-wallpaper-orbit.timer" ]]; then

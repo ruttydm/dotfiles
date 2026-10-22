@@ -25,7 +25,9 @@
           "id": "ruttydm.clock",
           "format": "dddd HH:mm:ss",
           "formatAlt": "d MMMM 'W'ww yyyy",
-          "verticalFormat": "HH\n—\nmm\n—\nss"
+          "verticalFormat": "HH\n—\nmm\n—\nss",
+          "compareTimezone": "Europe/Brussels",
+          "compareLabel": "BRU"
         },
         {
           "id": "io.github.ruttydm.nimbus"

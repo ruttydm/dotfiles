@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Point the system timezone at wherever this machine actually is.
+#
+# tzupdate reads the public IP. Tunnels are ignored so a Tailscale exit node
+# does not drag the clock to another country. A physical link coming up is
+# the travel signal: new cafe, new hotel, new city.
+#
+# NetworkManager calls this as root with the interface and action. Running it
+# with no arguments adjusts immediately.
+set -euo pipefail
+
+iface="${1:-}"
+action="${2:-}"
+
+if [[ -n "$iface" || -n "$action" ]]; then
+  case "$iface" in
+    lo|tailscale*|docker*|virbr*|br-*|veth*|tun*|tap*|wg*|dummy*|devtest*|zt*) exit 0 ;;
+  esac
+  case "$action" in
+    up|connectivity-change) ;;
+    *) exit 0 ;;
+  esac
+  # Captive portals and dead links have no usable geolocation answer.
+  if [[ "$action" == "connectivity-change" && -n "${CONNECTIVITY:-}" && "$CONNECTIVITY" != "full" && "$CONNECTIVITY" != "limited" ]]; then
+    exit 0
+  fi
+fi
+
+command -v tzupdate >/dev/null 2>&1 || exit 0
+command -v timedatectl >/dev/null 2>&1 || exit 0
+
+lock="${XDG_RUNTIME_DIR:-/tmp}/omarchy-timezone-auto.lock"
+touch "$lock" 2>/dev/null || lock=/tmp/omarchy-timezone-auto.lock
+exec 9>"$lock"
+flock -w 30 9 || exit 0
+
+zone=""
+attempt=0
+while [[ "$attempt" -lt 3 ]]; do
+  zone="$(tzupdate -p 2>/dev/null || true)"
+  zone="${zone//$'\n'/}"
+  if [[ "$zone" =~ ^[A-Za-z0-9+_-]+(/[A-Za-z0-9+_-]+)*$ && -e "/usr/share/zoneinfo/$zone" ]]; then
+    break
+  fi
+  zone=""
+  attempt=$((attempt + 1))
+  sleep 1
+done
+[[ -n "$zone" ]] || exit 0
+
+current="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+[[ "$zone" == "$current" ]] && exit 0
+
+timedatectl set-timezone "$zone"
+logger -t omarchy-timezone "timezone ${current:-unknown} -> ${zone}" || true
+
+user="${OMARCHY_TZ_USER:-}"
+if [[ -z "$user" || "$user" == root ]]; then
+  user="$(loginctl list-sessions --no-legend 2>/dev/null | awk 'NF >= 3 { print $3; exit }')"
+fi
+[[ -n "$user" && "$user" != root ]] || exit 0
+
+uid="$(id -u "$user" 2>/dev/null || true)"
+runtime="/run/user/${uid}"
+[[ -n "$uid" && -d "$runtime" ]] || exit 0
+
+run_as_user() {
+  runuser -u "$user" -- env \
+    XDG_RUNTIME_DIR="$runtime" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=${runtime}/bus" \
+    "$@"
+}
+
+# The status bar is a long-running process. Qt keeps the zone it read at
+# startup, so the clock stays wrong until that process starts again.
+if ! run_as_user omarchy restart shell; then
+  logger -t omarchy-timezone "timezone is ${zone}; shell restart failed" || true
+fi
+run_as_user omarchy-notification-send "Timezone is now ${zone}" || true

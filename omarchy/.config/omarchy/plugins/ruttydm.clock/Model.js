@@ -267,6 +267,55 @@ function stepMonth(year, month, delta) {
   return { year: target.getFullYear(), month: target.getMonth() }
 }
 
+// "+0200" / "-0530" from `date +%z`, minutes east of UTC. Null when it is not a zone offset.
+function offsetMinutes(spec) {
+  var match = /^([+-])(\d{2}):?(\d{2})$/.exec(String(spec == null ? "" : spec).trim())
+  if (!match) return null
+  var hours = parseInt(match[2], 10)
+  var mins = parseInt(match[3], 10)
+  if (hours > 14 || mins > 59) return null
+  return (match[1] === "-" ? -1 : 1) * (hours * 60 + mins)
+}
+
+function pad2(value) {
+  var n = Math.floor(Math.abs(Number(value)))
+  return (n < 10 ? "0" : "") + n
+}
+
+// Wall clock in a zone whose current UTC offset is `eastMinutes`.
+function formatOffsetClock(date, eastMinutes, withSeconds) {
+  if (!date || eastMinutes === null || eastMinutes === undefined || isNaN(eastMinutes)) return ""
+  var shifted = new Date(date.getTime() + eastMinutes * 60000)
+  if (isNaN(shifted.getTime())) return ""
+  var text = pad2(shifted.getUTCHours()) + ":" + pad2(shifted.getUTCMinutes())
+  if (withSeconds) text += ":" + pad2(shifted.getUTCSeconds())
+  return text
+}
+
+function zoneCity(zone) {
+  var name = String(zone || "")
+  var slash = name.lastIndexOf("/")
+  if (slash >= 0) name = name.substring(slash + 1)
+  return name.replace(/_/g, " ")
+}
+
+// How far `otherEastMinutes` sits from the local zone. "5h behind", "same time".
+function relativeOffsetLabel(localEastMinutes, otherEastMinutes) {
+  if (localEastMinutes === null || otherEastMinutes === null) return ""
+  if (isNaN(localEastMinutes) || isNaN(otherEastMinutes)) return ""
+  var delta = otherEastMinutes - localEastMinutes
+  if (delta === 0) return "same time"
+  var ahead = delta > 0
+  var abs = Math.abs(delta)
+  var hours = Math.floor(abs / 60)
+  var mins = abs % 60
+  var body = ""
+  if (hours && mins) body = hours + "h " + mins + "m"
+  else if (hours) body = hours + "h"
+  else body = mins + "m"
+  return body + (ahead ? " ahead" : " behind")
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     dateKey: dateKey,
@@ -291,6 +340,10 @@ if (typeof module !== "undefined") {
     clockFormats: clockFormats,
     clockFormatRing: clockFormatRing,
     nextClockFormat: nextClockFormat,
-    isoWeekLiteral: isoWeekLiteral
+    isoWeekLiteral: isoWeekLiteral,
+    offsetMinutes: offsetMinutes,
+    formatOffsetClock: formatOffsetClock,
+    zoneCity: zoneCity,
+    relativeOffsetLabel: relativeOffsetLabel
   }
 }
