@@ -77,12 +77,7 @@
           "id": "omarchy.monitor"
         },
         {
-          "id": "resources",
-          "type": "command",
-          "exec": "~/.config/omarchy/bar/scripts/resources",
-          "interval": 2,
-          "tooltip": "CPU and memory",
-          "onClick": "omarchy-launch-or-focus-tui btop"
+          "id": "ruttydm.tailnet"
         },
         {
           "id": "omarchy.power",

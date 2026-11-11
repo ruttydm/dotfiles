@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "ruttydm.tailnet",
+  "name": "Tailnet stats",
+  "version": "1.0.0",
+  "author": "ruttydm",
+  "description": "CPU and memory for this machine on the bar; click for CPU, memory, load and disk of every device on the tailnet.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Tailnet stats",
+    "description": "This machine's CPU and memory; the dropdown lists every tailnet device with live stats from ginger-dev boxes.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshSeconds": 15
+    },
+    "schema": [
+      {
+        "key": "refreshSeconds",
+        "type": "integer",
+        "label": "Refresh while open (seconds)",
+        "min": 10,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 15
+      }
+    ]
+  }
+}
