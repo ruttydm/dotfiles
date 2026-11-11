@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Every device on the tailnet, with live CPU, memory, load and disk where a box serves them.
+
+Prints one JSON document for the bar's tailnet dropdown (ruttydm.tailnet):
+
+  {"v": 1, "updated": <epoch>, "devices": [{name, host, os, online, self, group, url, stats, ...}]}
+
+Where the data comes from:
+  - The device list, online state, OS, tags and last-seen time come from `tailscale status --json`.
+    Phones and tablets (iOS, Android) and Mullvad exit nodes are left out.
+  - Dev boxes are the entries in ginger-dev's boxes.toml, matched to devices by tailscale_ip. Each
+    serves https://<domain>/stats.json on its tailnet IP only. All online boxes are fetched in parallel.
+  - This machine reads /proc directly, so it never depends on its own web server.
+  - A device tagged with one of --server-tag (default tag:server) goes in the "server" group.
+
+Run by the panel only while the dropdown is open. Everything fetched is validated and bounded
+before it is printed; nothing fetched is ever executed or put into a shell command.
+"""
+from __future__ import annotations
+
+import argparse
+import calendar
+import concurrent.futures
+import json
+import os
+import re
+import socket
+import ssl
+import subprocess
+import sys
+import time
+import tomllib
+import urllib.request
+from pathlib import Path
+
+HIDDEN_OS = {"ios", "android", "tvos", "ipados"}
+MAX_STATS_BYTES = 64 * 1024
+FETCH_TIMEOUT = 5.0
+NAME_RE = re.compile(r"^[A-Za-z0-9 ._'’()-]{1,64}$")
+DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+
+
+# ---------------------------------------------------------------- local stats
+
+def cpu_times(proc: Path) -> tuple[int, int]:
+    fields = (proc / "stat").read_text().split("\n", 1)[0].split()
+    numbers = [int(x) for x in fields[1:9]]
+    return sum(numbers), numbers[3] + numbers[4]
+
+
+def local_stats(proc: Path = Path("/proc"), sys_root: Path = Path("/sys"), sample: float = 0.25) -> dict:
+    """The same shape a box's /stats.json returns, read from this machine."""
+    first = cpu_times(proc)
+    if sample > 0:
+        time.sleep(sample)
+    second = cpu_times(proc)
+    total = second[0] - first[0]
+    busy = total - (second[1] - first[1])
+    mem = {}
+    for line in (proc / "meminfo").read_text().splitlines():
+        key, _, rest = line.partition(":")
+        parts = rest.split()
+        if parts and parts[0].isdigit():
+            mem[key] = int(parts[0]) * 1024
+    fs = os.statvfs("/")
+    temp = None
+    for zone in sorted(sys_root.glob("class/thermal/thermal_zone*")):
+        try:
+            kind = (zone / "type").read_text().strip().lower()
+            milli = int((zone / "temp").read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if any(k in kind for k in ("cpu", "x86_pkg", "soc", "k10temp", "coretemp", "acpitz")) and 0 < milli < 150_000:
+            temp = max(temp or 0, round(milli / 1000, 1))
+    return {
+        "v": 1,
+        "uptime_s": int(float((proc / "uptime").read_text().split()[0])),
+        "cpu": {"pct": round(max(0.0, min(100.0, busy * 100.0 / total)), 1) if total > 0 else 0.0,
+                "cores": os.cpu_count() or 1},
+        "load": [float(x) for x in (proc / "loadavg").read_text().split()[:3]],
+        "mem": {"total": mem.get("MemTotal", 0), "available": mem.get("MemAvailable", 0)},
+        "swap": {"total": mem.get("SwapTotal", 0), "free": mem.get("SwapFree", 0)},
+        "disk": {"total": fs.f_blocks * fs.f_frsize, "used": (fs.f_blocks - fs.f_bavail) * fs.f_frsize},
+        "temp_c": temp,
+    }
+
+
+# ------------------------------------------------------------- validation
+
+def _num(value, lo: float = 0, hi: float = float("inf")) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value < lo or value > hi:  # NaN or out of range
+        return None
+    return value
+
+
+def clean_stats(raw) -> dict | None:
+    """Keep only the fields the panel shows, each a number in a sane range. None if unusable."""
+    if not isinstance(raw, dict) or raw.get("v") != 1:
+        return None
+    cpu = raw.get("cpu") if isinstance(raw.get("cpu"), dict) else {}
+    mem = raw.get("mem") if isinstance(raw.get("mem"), dict) else {}
+    swap = raw.get("swap") if isinstance(raw.get("swap"), dict) else {}
+    disk = raw.get("disk") if isinstance(raw.get("disk"), dict) else {}
+    load = raw.get("load") if isinstance(raw.get("load"), list) else []
+    out = {
+        "cpu": _num(cpu.get("pct"), 0, 100),
+        "cores": _num(cpu.get("cores"), 1, 4096),
+        "load": [x for x in (_num(v, 0, 1e5) for v in load[:3]) if x is not None],
+        "memTotal": _num(mem.get("total"), 1, 1 << 50),
+        "memAvailable": _num(mem.get("available"), 0, 1 << 50),
+        "swapTotal": _num(swap.get("total"), 0, 1 << 50),
+        "swapFree": _num(swap.get("free"), 0, 1 << 50),
+        "diskTotal": _num(disk.get("total"), 1, 1 << 60),
+        "diskUsed": _num(disk.get("used"), 0, 1 << 60),
+        "tempC": _num(raw.get("temp_c"), -50, 200),
+        "uptime": _num(raw.get("uptime_s"), 0, 1 << 40),
+    }
+    if out["cpu"] is None or out["memTotal"] is None or out["memAvailable"] is None:
+        return None
+    out["memAvailable"] = min(out["memAvailable"], out["memTotal"])
+    if out["diskTotal"] is not None and out["diskUsed"] is not None:
+        out["diskUsed"] = min(out["diskUsed"], out["diskTotal"])
+    return out
+
+
+def safe_name(value, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    return text if NAME_RE.match(text) else fallback
+
+
+# ----------------------------------------------------------------- sources
+
+def tailscale_status() -> dict:
+    res = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=10)
+    if res.returncode != 0:
+        raise RuntimeError((res.stderr or "tailscale status failed").strip().splitlines()[-1][:200])
+    return json.loads(res.stdout)
+
+
+def boxes_file(explicit: str = "") -> Path | None:
+    candidates = []
+    if explicit:
+        candidates.append(Path(os.path.expanduser(explicit)))
+    if os.environ.get("GINGER_DEV_BOXES"):
+        candidates.append(Path(os.environ["GINGER_DEV_BOXES"]))
+    dev = Path.home() / ".local/bin/dev"
+    if dev.exists():
+        candidates.append(dev.resolve().parent.parent / "boxes.toml")
+    candidates.append(Path.home() / "Projects/ginger-dev/boxes.toml")
+    return next((p for p in candidates if p.is_file()), None)
+
+
+def load_boxes(path: Path | None) -> dict[str, dict]:
+    """tailscale IP -> {name, domain}, for boxes with a valid domain."""
+    if not path:
+        return {}
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    out = {}
+    for name, cfg in (data.get("boxes") or {}).items():
+        if not isinstance(cfg, dict):
+            continue
+        ip = str(cfg.get("tailscale_ip") or "")
+        domain = str(cfg.get("domain") or "").lower()
+        if ip and DOMAIN_RE.match(domain) and NAME_RE.match(str(name)):
+            out[ip] = {"name": str(name), "domain": domain}
+    return out
+
+
+def fetch_stats(url: str, timeout: float = FETCH_TIMEOUT) -> tuple[dict | None, str]:
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "omarchy-tailnet-stats"})
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context()) as r:
+            body = r.read(MAX_STATS_BYTES + 1)
+        if len(body) > MAX_STATS_BYTES:
+            return None, "response too large"
+        stats = clean_stats(json.loads(body))
+        return (stats, "") if stats else (None, "no stats")
+    except urllib.error.HTTPError as e:
+        return None, "no stats" if e.code == 404 else f"HTTP {e.code}"
+    except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as e:
+        reason = getattr(e, "reason", e)
+        return None, "timed out" if "timed out" in str(reason) else "unreachable"
+    except (ValueError, json.JSONDecodeError):
+        return None, "bad response"
+
+
+# ----------------------------------------------------------------- assemble
+
+def device(node: dict, *, is_self: bool, boxes: dict, server_tags: set[str]) -> dict | None:
+    os_name = str(node.get("OS") or "").lower()
+    if os_name in HIDDEN_OS or node.get("Location"):  # phones, tablets, Mullvad exit nodes
+        return None
+    ips = [str(ip) for ip in node.get("TailscaleIPs") or []]
+    box = next((boxes[ip] for ip in ips if ip in boxes), None)
+    host = safe_name(node.get("HostName"), "device")
+    dns = str(node.get("DNSName") or "").rstrip(".")
+    tags = {str(t) for t in node.get("Tags") or []}
+    online = bool(node.get("Online")) or is_self
+    last_seen = str(node.get("LastSeen") or "")
+    last_seen_epoch = 0
+    if not online and last_seen and not last_seen.startswith("0001"):
+        try:
+            last_seen_epoch = calendar.timegm(time.strptime(last_seen[:19], "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            last_seen_epoch = 0
+    group = "server" if tags & server_tags else ("dev" if box else "other")
+    return {
+        "id": dns or host,
+        "name": box["name"] if box else host.split(".")[0],
+        "host": dns.split(".")[0] if dns else host,
+        "os": os_name or "unknown",
+        "online": online,
+        "self": is_self,
+        "group": group,
+        "lastSeen": last_seen_epoch,
+        "url": f"https://{box['domain']}" if box else "",
+        "statsUrl": f"https://{box['domain']}/stats.json" if box else "",
+        "stats": None,
+        "error": "",
+    }
+
+
+def collect(status: dict, boxes: dict, server_tags: set[str], fetch=fetch_stats, local=local_stats) -> dict:
+    devices = []
+    me = status.get("Self") or {}
+    if me:
+        d = device(me, is_self=True, boxes=boxes, server_tags=server_tags)
+        if d:
+            devices.append(d)
+    for peer in (status.get("Peer") or {}).values():
+        d = device(peer, is_self=False, boxes=boxes, server_tags=server_tags)
+        if d:
+            devices.append(d)
+
+    wanted = [d for d in devices if d["online"] and d["statsUrl"] and not d["self"]]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(8, len(wanted) + 1))) as pool:
+        futures = {pool.submit(fetch, d["statsUrl"]): d for d in wanted}
+        mine = next((d for d in devices if d["self"]), None)
+        if mine:
+            try:
+                mine["stats"] = clean_stats(local())
+            except (OSError, ValueError) as e:
+                mine["error"] = type(e).__name__
+        for fut in concurrent.futures.as_completed(futures):
+            d = futures[fut]
+            try:
+                d["stats"], d["error"] = fut.result()
+            except Exception as e:  # noqa: BLE001
+                d["stats"], d["error"] = None, type(e).__name__
+    for d in devices:
+        d.pop("statsUrl", None)
+
+    order = {"server": 0, "dev": 1, "other": 2}
+    devices.sort(key=lambda d: (order[d["group"]], not d["self"], not d["online"], d["name"].lower()))
+    return {"v": 1, "updated": int(time.time()), "devices": devices}
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--boxes", default="", help="ginger-dev boxes.toml (default: next to the dev command)")
+    ap.add_argument("--server-tag", action="append", default=[], help="Tailscale tag for the server group")
+    a = ap.parse_args(argv)
+    try:
+        status = tailscale_status()
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as e:
+        print(json.dumps({"v": 1, "updated": int(time.time()), "devices": [], "error": str(e)[:200]}))
+        return 0
+    result = collect(status, load_boxes(boxes_file(a.boxes)), set(a.server_tag or ["tag:server"]))
+    if status.get("BackendState") not in (None, "Running"):
+        result["error"] = f"Tailscale is {str(status.get('BackendState'))[:32].lower()}"
+    print(json.dumps(result, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
