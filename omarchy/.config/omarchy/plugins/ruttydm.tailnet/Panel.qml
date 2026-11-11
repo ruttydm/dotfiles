@@ -433,7 +433,20 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: row.clickable ? Qt.PointingHandCursor : Qt.ArrowCursor
-      onClicked: root.activate(row.device)
+      // A click on the CPU or RAM meters opens that chart on the box's dashboard;
+      // anywhere else on the row keeps the row's own action.
+      onClicked: function(ev) {
+        var p = mouse.mapToItem(right, ev.x, ev.y)
+        var metric = right.visible && p.x >= 0 && p.y >= 0 && p.x <= right.width && p.y <= right.height
+          ? (p.y < right.height / 2 ? "cpu" : "mem") : ""
+        var url = metric ? Model.metricUrl(row.device, metric) : ""
+        if (url !== "") {
+          Qt.openUrlExternally(url)
+          root.close()
+        } else {
+          root.activate(row.device)
+        }
+      }
       onContainsMouseChanged: if (containsMouse) { root.cursorActive = false }
     }
 

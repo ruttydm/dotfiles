@@ -234,6 +234,12 @@ function canActivate(d) {
   return d.self || d.url !== ""
 }
 
+// The box dashboard opens a metric's history chart from the URL hash.
+function metricUrl(d, metric) {
+  if (!d || !d.url || ["cpu", "mem", "load", "disk", "temp"].indexOf(metric) < 0) return ""
+  return d.url + "/#" + metric
+}
+
 function activateHint(d) {
   if (d.self) return "Open btop"
   if (d.url) return "Open " + d.url.replace(/^https:\/\//, "")
@@ -245,6 +251,6 @@ if (typeof module !== "undefined") {
     cpuTimes: cpuTimes, cpuPercent: cpuPercent, memory: memory, barText: barText, barTooltip: barTooltip,
     gib: gib, percent: percent, ago: ago, duration: duration, updatedLabel: updatedLabel,
     parse: parse, grouped: grouped, flat: flat, onlineCount: onlineCount, subtitle: subtitle,
-    detail: detail, memLabel: memLabel, canActivate: canActivate, activateHint: activateHint
+    detail: detail, memLabel: memLabel, canActivate: canActivate, activateHint: activateHint, metricUrl: metricUrl
   }
 }

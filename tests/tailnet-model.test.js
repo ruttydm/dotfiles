@@ -73,4 +73,7 @@ test("row wording", () => {
   assert.equal(M.activateHint(by("a")), "Open pi.example.cc")
   assert.equal(M.activateHint(by("c")), "Open btop")
   assert.equal(M.canActivate(by("b")), false)
+  assert.equal(M.metricUrl(by("a"), "cpu"), "https://pi.example.cc/#cpu")
+  assert.equal(M.metricUrl(by("a"), "evil"), "")
+  assert.equal(M.metricUrl(by("b"), "mem"), "")
 })
