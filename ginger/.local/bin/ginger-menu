@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""The Ginger submenu in the Omarchy menu (Super+Alt+D, or Omarchy menu → Ginger).
+
+Omarchy's menu cannot run custom providers, so this writes plain rows into the
+user extension file, ~/.config/omarchy/extensions/omarchy-menu.jsonc, between
+two marker comments. Everything outside the markers is left alone. The shell
+watches that file and picks the change up by itself.
+
+  ginger-menu refresh [--notify]   ask rz for every box's projects, cache them, rewrite the rows
+  ginger-menu render               rewrite the rows from the cache only (no network)
+
+`dev ls --all --json` runs on rz over SSH (about 15 s; tp's link is slow). tp's
+own projects come from the local `dev ls --json`, because rz cannot always reach
+tp. The ginger-menu-refresh timer runs `refresh` every 30 minutes.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "ginger-menu" / "projects.json"
+MENU = HOME / ".config/omarchy/extensions/omarchy-menu.jsonc"
+REMOTE = os.environ.get("GINGER_MENU_REMOTE", "rz")
+LOCAL_BOX = os.environ.get("GINGER_MENU_LOCAL_BOX", "tp")
+BOXES = ("rz", "pi", "tp")
+BEGIN = "  // ginger-menu:begin (written by ginger-menu; edits between these lines are replaced)"
+END = "  // ginger-menu:end"
+
+ICON_MENU = "󰒋"
+ICON_TERM = "\ue795"
+ICON_T3 = "󰚩"
+ICON_BOX = "󰒍"
+ICON_LINK = "󰖟"
+ICON_REFRESH = "󰑐"
+
+
+def dev_ls(cmd: list[str], timeout: int) -> list[dict]:
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=True).stdout
+    data = json.loads(out)
+    if not isinstance(data, list):
+        raise ValueError("dev ls did not return a list")
+    return data
+
+
+def fetch() -> list[dict]:
+    """Every box's projects from rz, with this box's own list taken locally."""
+    remote = dev_ls(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", REMOTE,
+                     "~/.local/bin/dev ls --all --json"], timeout=120)
+    try:
+        local = dev_ls([str(HOME / ".local/bin/dev"), "ls", "--json"], timeout=60)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        local = []
+    if local:
+        remote = [p for p in remote if p.get("box") != LOCAL_BOX] + local
+    return remote
+
+
+def projects(raw: list[dict]) -> list[dict]:
+    """Served projects only (a URL, not a worktree), sorted by box then name."""
+    rows = [p for p in raw if p.get("url") and not p.get("worktree_of") and p.get("box")]
+    order = {b: i for i, b in enumerate(BOXES)}
+    return sorted(rows, key=lambda p: (order.get(p["box"], len(BOXES)), p["box"], p["name"].lower()))
+
+
+def slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "-", value.lower()).strip("-") or "x"
+
+
+def row(item_id: str, **fields: str) -> str:
+    return f"  {json.dumps(item_id)}: {json.dumps(fields, ensure_ascii=False)},"
+
+
+def block(items: list[dict], updated: float | None) -> str:
+    lines = [BEGIN,
+             row("ginger", icon=ICON_MENU, label="Ginger", description="Dev boxes, T3 and projects"),
+             row("ginger.term-rz", icon=ICON_TERM, label="Terminal on rz", description="herdr session · Super+Alt+R",
+                 action="omarchy-launch-terminal rz"),
+             row("ginger.term-pi", icon=ICON_TERM, label="Terminal on pi", description="herdr session · Super+Alt+P",
+                 action="omarchy-launch-terminal rpi")]
+    for box in BOXES:
+        extra = " · Super+Alt+T" if box == "rz" else ""
+        lines.append(row(f"ginger.t3-{box}", icon=ICON_T3, label=f"T3 on {box}",
+                         description=f"t3.{box}.afai.cc{extra}", action=f"t3o {box}"))
+    boxes = [b for b in BOXES if any(p["box"] == b for p in items)]
+    boxes += sorted({p["box"] for p in items} - set(boxes))
+    for box in boxes:
+        mine = [p for p in items if p["box"] == box]
+        lines.append(row(f"ginger.{slug(box)}", icon=ICON_BOX, label=f"{box} projects",
+                         description=f"{len(mine)} served on {box}"))
+        taken: set[str] = set()
+        for p in mine:
+            pid = f"ginger.{slug(box)}.{slug(p['name'])}"
+            while pid in taken:
+                pid += "-"
+            taken.add(pid)
+            host = re.sub(r"^https?://", "", p["url"]).rstrip("/")
+            kind = p.get("framework") or p.get("stack") or ""
+            desc = " · ".join(x for x in (host, kind if kind != "none" else "") if x)
+            lines.append(row(pid, icon=ICON_LINK, label=p["name"], description=desc,
+                             action=f"xdg-open {shlex.quote(p['url'])}"))
+    when = time.strftime("%d %b %H:%M", time.localtime(updated)) if updated else "never"
+    lines.append(row("ginger.refresh", icon=ICON_REFRESH, label="Refresh project list",
+                     description=f"from {REMOTE} · updated {when}", action="ginger-menu refresh --notify"))
+    lines.append(END)
+    return "\n".join(lines)
+
+
+def splice(text: str, new_block: str) -> str:
+    """Put the block into the JSONC text: in place of an earlier block, else before the
+    closing brace. A file without an object gets a new one."""
+    start, end = text.find(BEGIN.strip()), text.find(END.strip())
+    if start != -1 and end > start:
+        line_start = text.rfind("\n", 0, start) + 1
+        line_end = text.find("\n", end)
+        line_end = len(text) if line_end == -1 else line_end
+        return text[:line_start] + new_block + text[line_end:]
+    close = text.rfind("}")
+    if close == -1:
+        return "{\n" + new_block + "\n}\n"
+    before = text[:close]
+    # The entry before ours needs a comma; trailing commas are fine in Omarchy's JSONC.
+    # Omarchy only strips whole-line comments, so only those are skipped here ("//" in a URL is data).
+    code = [ln.rstrip() for ln in before.splitlines() if ln.strip() and not ln.lstrip().startswith("//")]
+    if code and not code[-1].endswith(("{", ",")):
+        idx = before.rfind(code[-1])
+        before = before[:idx + len(code[-1])] + "," + before[idx + len(code[-1]):]
+    return before.rstrip("\n") + "\n\n" + new_block + "\n" + text[close:]
+
+
+def load_cache() -> tuple[list[dict], float | None]:
+    try:
+        data = json.loads(CACHE.read_text())
+        return data["projects"], data["updated"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return [], None
+
+
+def render(items: list[dict], updated: float | None) -> bool:
+    try:
+        text = MENU.read_text()
+    except FileNotFoundError:
+        text = ""
+    new = splice(text, block(items, updated))
+    if new == text:
+        return False
+    MENU.parent.mkdir(parents=True, exist_ok=True)
+    MENU.write_text(new)
+    return True
+
+
+def notify(summary: str, body: str = "") -> None:
+    subprocess.run(["notify-send", "--app-name=Ginger", summary, body], check=False)
+
+
+def main(argv: list[str]) -> int:
+    cmd = argv[1] if len(argv) > 1 else "render"
+    loud = "--notify" in argv
+    if cmd == "render":
+        render(*load_cache())
+        return 0
+    if cmd != "refresh":
+        print(__doc__, file=sys.stderr)
+        return 2
+    if loud:
+        notify("Ginger", f"Refreshing projects from {REMOTE}…")
+    try:
+        items = projects(fetch())
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        print(f"refresh failed: {e}", file=sys.stderr)
+        render(*load_cache())
+        if loud:
+            notify("Ginger: refresh failed", f"Kept the cached list. {e}"[:300])
+        return 1
+    now = time.time()
+    CACHE.parent.mkdir(parents=True, exist_ok=True)
+    CACHE.write_text(json.dumps({"updated": now, "projects": items}))
+    render(items, now)
+    if loud:
+        notify("Ginger", f"{len(items)} projects in the menu")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

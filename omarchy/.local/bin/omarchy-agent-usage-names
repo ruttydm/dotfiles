@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Shorten Agents panel tab labels. Does not touch the panel code.
+
+Collectors keep writing their own records. This patches only the "name"
+string inside the current file, and writes nothing when the name is already
+short. It never rewrites the rest of a record, so a slow pass cannot put an
+older failed snapshot back on top of a fresh one.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+USAGE = Path.home() / ".local" / "state" / "omarchy" / "agents" / "usage"
+SHORT = {
+    "claude": "Claude",
+    "codex": "Codex",
+    "cursor": "Cursor",
+    "grok": "Grok",
+    "zai": "GLM",
+}
+
+
+def patched(original: str) -> str | None:
+    try:
+        record = json.loads(original)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    agent_id = str(record.get("id") or "")
+    short = SHORT.get(agent_id)
+    current = record.get("name")
+    if not short or not isinstance(current, str) or current == short:
+        return None
+    old = json.dumps(current, ensure_ascii=False)
+    new = json.dumps(short, ensure_ascii=False)
+    needle = f'"name":{old}'
+    spaced = f'"name": {old}'
+    if original.count(needle) + original.count(spaced) != 1:
+        return None
+    if needle in original:
+        return original.replace(needle, f'"name":{new}', 1)
+    return original.replace(spaced, f'"name": {new}', 1)
+
+
+def shorten(path: Path) -> None:
+    for _ in range(3):
+        original = path.read_text()
+        updated = patched(original)
+        if updated is None:
+            return
+        temporary = path.with_name(f".{path.stem}.name.tmp")
+        # Created 0600 up front: a chmod after the rename would fire the .path unit again.
+        temporary.unlink(missing_ok=True)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(updated)
+        # The collector replaced the file while we were patching it.
+        if path.read_text() != original:
+            temporary.unlink(missing_ok=True)
+            continue
+        os.replace(temporary, path)
+        return
+
+
+def main() -> int:
+    if not USAGE.is_dir():
+        return 0
+    for path in sorted(USAGE.glob("*.json")):
+        shorten(path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

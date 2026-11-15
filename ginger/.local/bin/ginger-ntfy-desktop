@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Show Ginger's ntfy pushes (`dev notify`) as desktop notifications.
+
+Subscribes to the topic on the tailnet ntfy server and passes each message to
+notify-send: title, text, priority (as urgency) and the click URL. Clicking
+the notification opens that URL. Runs as the ginger-ntfy-desktop user service.
+
+The stream is plain HTTPS (ntfy's JSON stream), so no ntfy client is needed.
+ntfy sends a keepalive every 45 seconds; a read that stays silent longer than
+READ_TIMEOUT means the connection died (sleep, network change), and the loop
+reconnects. Each reconnect asks for messages since the last one seen, capped at
+MAX_BACKLOG, so a push sent while the laptop slept still shows, but a long
+sleep does not replay a day of old pushes.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+URL = os.environ.get("GINGER_NTFY_URL", "https://ntfy.rz.afai.cc").rstrip("/")
+TOPIC = os.environ.get("GINGER_NTFY_TOPIC", "rutger")
+READ_TIMEOUT = 75          # seconds; ntfy keepalive is 45
+MAX_BACKLOG = 3600         # seconds of missed pushes to replay after a reconnect
+STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "ginger-ntfy-desktop" / "last.json"
+
+
+def urgency(priority: object) -> str:
+    """ntfy priority 1-5 to a notify-send urgency. 5 (max) stays until dismissed."""
+    try:
+        p = int(priority)
+    except (TypeError, ValueError):
+        p = 3
+    if p >= 5:
+        return "critical"
+    if p <= 2:
+        return "low"
+    return "normal"
+
+
+def click_url(msg: dict) -> str:
+    url = msg.get("click") or ""
+    if not url:
+        for action in msg.get("actions") or []:
+            if action.get("action") == "view" and action.get("url"):
+                url = action["url"]
+                break
+    return url if urllib.parse.urlparse(url).scheme in ("http", "https") else ""
+
+
+def notify_args(msg: dict) -> list[str]:
+    """The notify-send command for one ntfy message. The body is escaped: Omarchy's
+    notification server renders markup, and push text is not markup."""
+    title = msg.get("title") or f"ntfy · {msg.get('topic') or TOPIC}"
+    body = html.escape(msg.get("message") or "", quote=False)
+    args = ["notify-send", "--app-name=ntfy", f"--urgency={urgency(msg.get('priority'))}"]
+    if click_url(msg):
+        args += ["--action=default=Open", "--wait"]
+    return args + ["--", title, body]
+
+
+def show(msg: dict) -> None:
+    url = click_url(msg)
+    args = notify_args(msg)
+    if not url:
+        subprocess.run(args, check=False)
+        return
+
+    def wait_for_click() -> None:
+        # --wait blocks until the card closes and prints the action key if one was used.
+        done = subprocess.run(args, check=False, capture_output=True, text=True)
+        if done.stdout.strip() == "default":
+            subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+
+    threading.Thread(target=wait_for_click, daemon=True).start()
+
+
+def since_param(last: dict, now: float) -> str:
+    """Resume after the last message seen (ntfy's since=<id> is exclusive), but never
+    further back than MAX_BACKLOG. First start: only new pushes."""
+    if not last.get("time"):
+        return str(int(now))
+    if last.get("id") and last["time"] >= now - MAX_BACKLOG:
+        return str(last["id"])
+    return str(int(now - MAX_BACKLOG))
+
+
+def load_last() -> dict:
+    try:
+        data = json.loads(STATE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_last(last: dict) -> None:
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(last) + "\n")
+    os.replace(tmp, STATE)
+
+
+def stream(seen: dict[str, float]) -> None:
+    last = load_last()
+    query = urllib.parse.urlencode({"since": since_param(last, time.time())})
+    req = urllib.request.Request(f"{URL}/{urllib.parse.quote(TOPIC)}/json?{query}",
+                                 headers={"User-Agent": "ginger-ntfy-desktop"})
+    with urllib.request.urlopen(req, timeout=READ_TIMEOUT) as resp:
+        print(f"connected to {URL}/{TOPIC}", flush=True)
+        for raw in resp:
+            line = raw.strip()
+            if not line:
+                continue
+            msg = json.loads(line)
+            if msg.get("event") != "message":
+                continue
+            mid, ts = msg.get("id", ""), float(msg.get("time") or time.time())
+            if mid in seen:
+                continue
+            seen[mid] = ts
+            for old in [k for k, v in seen.items() if v < ts - MAX_BACKLOG]:
+                del seen[old]
+            show(msg)
+            if ts >= float(last.get("time") or 0):
+                last = {"id": mid, "time": ts}
+                save_last(last)
+
+
+def main() -> int:
+    if not shutil.which("notify-send"):
+        print("notify-send not found (libnotify)", file=sys.stderr)
+        return 1
+    seen: dict[str, float] = {}
+    delay = 2
+    while True:
+        started = time.monotonic()
+        try:
+            stream(seen)
+        except (OSError, socket.timeout, ValueError) as e:
+            print(f"stream ended: {e}", file=sys.stderr, flush=True)
+        # A connection that lasted a while was healthy: retry fast. Back off otherwise.
+        delay = 2 if time.monotonic() - started > 60 else min(delay * 2, 60)
+        time.sleep(delay)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

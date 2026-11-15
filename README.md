@@ -14,7 +14,7 @@ git clone https://github.com/ruttydm/dotfiles.git ~/Projects/dotfiles
 | Machine | What the script installs | What it links |
 |---|---|---|
 | macOS | `stow` (Homebrew) | `ghostty`, `herdr` |
-| Omarchy / Arch | `stow`, `pipewire-zeroconf`, `ghostty`, Zen Browser | `hypr`, `pipewire`, `ghostty-linux`, `wallpaper`, `tailscale`, `omarchy` |
+| Omarchy / Arch | `stow`, `pipewire-zeroconf`, `ghostty`, `mosh`, Zen Browser | `hypr`, `pipewire`, `ghostty-linux`, `wallpaper`, `tailscale`, `omarchy`, `ginger` |
 
 On Linux, pick **Office** in the volume mixer to play through the HomePod stereo pair. Do not pick **Office (2)**; that is the pair member, not the leader. The installer also clones [Pierre-Aoki Netrunner](https://github.com/Pierre-Aoki/omarchy-netrunner-theme) into `~/.config/omarchy/themes/netrunner` if it is missing (`omarchy theme install`, not Stow).
 
@@ -44,6 +44,25 @@ The Agents bar stays the built-in `omarchy.agents` panel. Fireworks is turned of
 Zen is not a Stow package. On Omarchy, `install.sh` runs `omarchy install browser zen` and `omarchy default browser zen` so new machines get the same keyboard-first browser with vertical tabs and Spaces. Chromium stays installed for Omarchy web apps.
 
 The repository contains configuration only. Runtime state, logs, sockets, credentials, session data, and machine-local backups are not included. `install.sh` is what installs the extra Arch/Homebrew packages a new machine needs.
+
+## Ginger dev boxes
+
+The `ginger` package (Linux only) is for working on Ginger's dev boxes from this laptop. Agent sessions and projects live on rz and pi; this machine is the screen.
+
+| Key or command | What it does |
+|---|---|
+| `Super+Alt+R`, `rz` | Terminal on rz, attached to its persistent herdr session. Uses mosh when rz has `mosh-server`, so typing echoes locally on a slow link and the session survives sleep and network changes. Without herdr it falls back to `tmux new -A -s main`, then a login shell. |
+| `Super+Alt+P`, `rpi` | The same on pi, over SSH. The command is `rpi` because `pi` is the pi coding agent. |
+| `rz CMD…`, `rpi CMD…` | Run one command there in a login shell, for example `rz dev ls`. |
+| `Super+Alt+T`, `t3o [box]` | Open T3 on rz (or the named box) in the default browser. |
+| `Super+Alt+D` | The Ginger menu, also at Omarchy menu → Ginger: terminals, T3 on each box, and every served project per box. Type to search; Enter opens the project's URL. |
+| `ssh rz`, `ssh pi` | One shared connection per box for 10 minutes (`~/.ssh/config`): later `ssh`, `scp`, `git` and mosh skip the handshake. Keepalive every 30 s, compression on. Host keys come from ginger-dev's `~/.config/ginger-dev/known_hosts`. |
+
+The project list comes from `dev ls --all --json`, run on rz over SSH because it takes about 15 seconds, plus this machine's own `dev ls --json`. `ginger-menu refresh` fetches it, caches it in `~/.cache/ginger-menu/projects.json` and writes the rows into `~/.config/omarchy/extensions/omarchy-menu.jsonc` between two `ginger-menu` marker comments. Omarchy's menu cannot run custom providers, so the rows are written into the file. Anything you add outside the markers stays. The `ginger-menu-refresh` timer refreshes every 30 minutes; the menu's last row refreshes on demand.
+
+Pushes sent with `dev notify` from any box show up as desktop notifications. `ginger-ntfy-desktop` (a user service) follows the `rutger` topic on `https://ntfy.rz.afai.cc` and hands each message to `notify-send`: priority 5 stays until dismissed, 1 and 2 are low. Clicking a notification that carries a link opens it. The service reconnects by itself; after sleep it shows pushes from the last hour it missed. Logs: `journalctl --user -u ginger-ntfy-desktop`.
+
+`install.sh` also sets `git config --global init.defaultBranch main`, appends `require("hypr.ginger")` to `~/.config/hypr/bindings.lua`, and links `dev` into `/usr/local/bin` (sudo), because Tailscale SSH runs remote commands with a bare `PATH` and no shell setup.
 
 ## Daily workflow
 
@@ -90,7 +109,7 @@ Preview without changing anything:
 
 ```sh
 cd ~/Projects/dotfiles
-stow --simulate --verbose=2 --target="$HOME" hypr pipewire ghostty-linux wallpaper tailscale omarchy   # Linux
+stow --simulate --verbose=2 --target="$HOME" hypr pipewire ghostty-linux wallpaper tailscale omarchy ginger   # Linux
 stow --simulate --verbose=2 --target="$HOME" ghostty herdr                 # macOS
 ```
 
@@ -99,7 +118,7 @@ stow --simulate --verbose=2 --target="$HOME" ghostty herdr                 # mac
 ```sh
 cd ~/Projects/dotfiles
 stow --delete --target="$HOME" ghostty herdr                      # macOS
-stow --delete --target="$HOME" hypr pipewire ghostty-linux wallpaper tailscale omarchy  # Omarchy / Arch
+stow --delete --target="$HOME" hypr pipewire ghostty-linux wallpaper tailscale omarchy ginger  # Omarchy / Arch
 ```
 
 Deleting Stow links does not delete the tracked files in this repository.

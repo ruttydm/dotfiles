@@ -131,6 +131,42 @@ install_timezone_autoupdate() {
   fi
 }
 
+# Ginger dev boxes from this laptop: shared SSH connections and mosh to rz and pi,
+# Super+Alt+R/P/T/D, the Ginger menu and ntfy pushes on the desktop. README: Ginger dev boxes.
+install_ginger() {
+  stow_packages ginger || stow_status=$?
+  if ! pacman -Q mosh >/dev/null 2>&1; then
+    echo "Installing mosh (rz uses it when the box has mosh-server too)"
+    if need_cmd omarchy; then
+      omarchy pkg add mosh || echo "Could not install mosh; rz falls back to ssh." >&2
+    else
+      sudo pacman -S --needed --noconfirm mosh || echo "Could not install mosh; rz falls back to ssh." >&2
+    fi
+  fi
+  # bindings.lua belongs to Omarchy and Which Key, so only a require line goes in.
+  local bindings="$HOME/.config/hypr/bindings.lua" line='require("hypr.ginger")'
+  if [[ -f "$bindings" ]] && ! grep -Fqx "$line" "$bindings"; then
+    echo "Adding the Ginger keybindings to $bindings"
+    printf '\n-- Ginger dev boxes: Super+Alt+R/P/T/D (dotfiles ginger package)\n%s\n' "$line" >>"$bindings"
+  fi
+  # Tailscale SSH runs remote commands with PATH=/usr/local/bin:/usr/bin:/bin and no
+  # shell setup, so `ssh tp dev ...` from another box would not find dev otherwise.
+  if [[ -x "$HOME/.local/bin/dev" && ! -e /usr/local/bin/dev ]]; then
+    echo "Linking dev into /usr/local/bin for non-interactive SSH"
+    sudo ln -s "$HOME/.local/bin/dev" /usr/local/bin/dev || echo "Could not link /usr/local/bin/dev (needs sudo)." >&2
+  fi
+  if [[ "$(git config --global init.defaultBranch || true)" != main ]]; then
+    git config --global init.defaultBranch main
+  fi
+  if [[ -f "$HOME/.config/systemd/user/ginger-ntfy-desktop.service" ]]; then
+    echo "Enabling ntfy desktop notifications and the Ginger menu refresh"
+    systemctl --user daemon-reload
+    systemctl --user enable --now ginger-ntfy-desktop.service ginger-menu-refresh.timer
+    "$HOME/.local/bin/ginger-menu" render
+    systemctl --user start --no-block ginger-menu-refresh.service
+  fi
+}
+
 stow_status=0
 
 case "$os" in
@@ -167,6 +203,7 @@ case "$os" in
         echo "Could not finish Tailscale SSH (needs sudo for the firewall and tailscaled restart). Re-run: enable-tailscale-ssh" >&2
       fi
     fi
+    install_ginger
     if need_cmd omarchy; then
       omarchy default terminal ghostty
       echo "Installing Zen Browser and making it the default"

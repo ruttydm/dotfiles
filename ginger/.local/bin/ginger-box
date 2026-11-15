@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Terminal on a Ginger dev box. Installed as `rz` and `rpi` (symlinks to this file;
+# not `pi`, which is the pi coding agent).
+#
+#   rz              attach the box's persistent herdr session (every box runs
+#                   `herdr server`); tmux, then a login shell, when herdr is missing.
+#                   Uses mosh when both ends have it: local echo on a slow link,
+#                   and the session survives sleep and network changes.
+#   rz CMD...       run one command there in a login shell, e.g. `rz dev ls`
+#   ginger-box BOX [CMD...]   the same for any host in ~/.ssh/config
+set -euo pipefail
+
+box="$(basename "$0")"
+[[ "$box" == rpi ]] && box=pi
+if [[ "$box" == ginger-box ]]; then
+  box="${1:?usage: ginger-box <box> [command...]}"
+  shift
+fi
+
+if (($#)); then
+  exec ssh -t "$box" "bash -lc $(printf '%q' "$*")"
+fi
+
+attach='h="$HOME/.local/bin/herdr"; [ -x "$h" ] && exec "$h"; command -v tmux >/dev/null 2>&1 && exec tmux new -A -s main; exec "${SHELL:-bash}" -l'
+
+# The probe opens the shared SSH connection, which mosh's own ssh then reuses.
+if [[ "${GINGER_NO_MOSH:-}" != 1 ]] && command -v mosh >/dev/null 2>&1 &&
+  ssh "$box" 'command -v mosh-server' >/dev/null 2>&1; then
+  exec mosh "$box" -- sh -c "$attach"
+fi
+exec ssh -t "$box" "$attach"
