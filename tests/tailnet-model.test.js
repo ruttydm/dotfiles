@@ -127,29 +127,30 @@ test("problems: offline fleet box, disk, swap and memory limits", () => {
   assert.equal(M.urgentCount(fleet()), 2)
 })
 
-test("bar segments: one pill per fleet box, urgent reason in place of the name", () => {
+test("bar segments: one coloured name per fleet box, details left to the tooltip", () => {
   const segs = plain(M.barSegments(23, { total: 100, used: 41 }, fleet()))
-  assert.equal(M.segmentsText(segs),
-    M.barText(23, { total: 100, used: 41 }) +
-    "  rz disk 93% swap 98% mem 97% 3" + M.WORK_ICON + " 1" + M.WAIT_ICON + " ✗1  pi off  qb  db?")
-  assert.deepEqual(segs.filter(s => s.role === "urgent").map(s => s.text),
-    ["rz disk 93% swap 98% mem 97%", " ✗1", "pi off"])
-  assert.deepEqual(segs.find(s => s.text === " 1" + M.WAIT_ICON), { text: " 1" + M.WAIT_ICON, role: "accent" })
-  assert.equal(segs.find(s => s.text === "qb").role, "dim")
-  // tp is left out while it has nothing to say; with an agent it gets a pill
+  assert.equal(M.segmentsText(segs), M.barText(23, { total: 100, used: 41 }) + "  rz" + M.WAIT_ICON + " pi qb db")
+  assert.deepEqual(segs.slice(1).map(s => [s.text, s.role]),
+    [["  ", "fg"], ["rz", "urgent"], [M.WAIT_ICON, "accent"], [" ", "fg"], ["pi", "urgent"],
+     [" ", "fg"], ["qb", "dim"], [" ", "fg"], ["db", "dim"]])
+  // tp stays off the bar while it has nothing to flag; a waiting agent puts it on
   const busy = fleet()
   busy[0].stats.agents.working = 1
+  assert.equal(M.pills(busy)[0].name, "rz")
+  busy[0].stats.agents.waiting = 1
   assert.equal(M.pills(busy)[0].name, "tp")
   assert.equal(M.segmentsText(M.barSegments(-1, null, [])), M.barText(-1, null))
 })
 
-test("calm box with agents is bold, quiet box dim", () => {
+test("calm box with agents working is bold, waiting adds one mark", () => {
   const ds = fleet()
   const rz = ds.find(d => d.id === "rz")
-  rz.stats.diskUsed = 40; rz.stats.swapUsed = 0; rz.stats.memUsed = GiB; rz.stats.ciFailing = 0
-  const segs = plain(M.barSegments(1, null, [rz]))
-  assert.deepEqual(segs.slice(1).map(s => [s.text, s.role]),
-    [["  ", "fg"], ["rz", "bold"], [" 3", "fg"], [M.WORK_ICON, "dim"], [" 1" + M.WAIT_ICON, "accent"]])
+  rz.stats.diskUsed = 40; rz.stats.swapUsed = 0; rz.stats.memUsed = GiB
+  assert.deepEqual(plain(M.barSegments(1, null, [rz])).slice(1).map(s => [s.text, s.role]),
+    [["  ", "fg"], ["rz", "bold"], [M.WAIT_ICON, "accent"]])
+  rz.stats.agents.waiting = 0
+  assert.deepEqual(plain(M.barSegments(1, null, [rz])).slice(1).map(s => [s.text, s.role]),
+    [["  ", "fg"], ["rz", "bold"]])
 })
 
 test("problem summary, agents line and tooltip", () => {

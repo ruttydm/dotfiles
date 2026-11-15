@@ -309,7 +309,7 @@ function failingOf(d) {
   return d && d.stats && d.online ? d.stats.ciFailing || 0 : 0
 }
 
-// One pill per fleet box, plus this machine when it has agents or a problem.
+// One name per fleet box, plus this machine when it has a problem or an agent waiting.
 function pills(devices) {
   var out = []
   for (var i = 0; i < devices.length; i++) {
@@ -320,30 +320,26 @@ function pills(devices) {
       name: d.name, problems: problems(d), working: a.working, waiting: a.waiting, failing: failingOf(d),
       unknown: d.online && !d.self && d.url !== "" && !d.stats
     }
-    if (d.self && p.problems.length === 0 && p.working + p.waiting + p.failing === 0) continue
+    if (d.self && p.problems.length === 0 && p.waiting === 0) continue
     out.push(p)
   }
   return out
 }
 
 // The bar label as coloured runs: [{ text, role }] with role fg | dim | bold | accent | urgent.
-// The local CPU and memory come first, unchanged; each pill follows two spaces after.
+// The local CPU and memory come first, unchanged. Then each box is only its name, and the colour is
+// the state: urgent when it has a problem, bold while agents work there, dim when quiet or unknown.
+// A single accent pause mark follows a box with an agent waiting for you. Reasons, counts and
+// failing PRs are in the tooltip and the dropdown, so the bar stays a few characters per box.
 function barSegments(cpu, mem, devices) {
   var out = [{ text: barText(cpu, mem), role: "fg" }]
   var list = pills(devices || [])
   for (var i = 0; i < list.length; i++) {
     var p = list[i]
-    var busy = p.working + p.waiting + p.failing > 0
-    out.push({ text: "  ", role: "fg" })
-    if (p.problems.length > 0) out.push({ text: p.name + " " + p.problems.join(" "), role: "urgent" })
-    else out.push({ text: p.name, role: busy ? "bold" : "dim" })
-    if (p.unknown && p.problems.length === 0) out.push({ text: "?", role: "dim" })
-    if (p.working > 0) {
-      out.push({ text: " " + p.working, role: "fg" })
-      out.push({ text: WORK_ICON, role: "dim" })
-    }
-    if (p.waiting > 0) out.push({ text: " " + p.waiting + WAIT_ICON, role: "accent" })
-    if (p.failing > 0) out.push({ text: " " + FAIL_MARK + p.failing, role: "urgent" })
+    out.push({ text: i === 0 ? "  " : " ", role: "fg" })
+    var role = p.problems.length > 0 ? "urgent" : (p.working + p.waiting > 0 ? "bold" : "dim")
+    out.push({ text: p.name, role: role })
+    if (p.waiting > 0) out.push({ text: WAIT_ICON, role: "accent" })
   }
   return out
 }
