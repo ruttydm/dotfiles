@@ -1,0 +1,6 @@
+[Unit]
+Description=Ginger: refresh the project list in the Omarchy menu
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ginger-menu refresh

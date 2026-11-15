@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# t3o [box]: open T3 on a Ginger box (rz by default) in the default browser.
+set -euo pipefail
+box="${1:-rz}"
+exec xdg-open "https://t3.${box}.afai.cc" >/dev/null 2>&1

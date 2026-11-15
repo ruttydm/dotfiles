@@ -1,0 +1,14 @@
+[Unit]
+Description=Shorten Omarchy Agents panel tab names
+# Collectors rewrite about twenty records within a second or two. Each write
+# fires the .path unit, and five starts in 10 s used to trip systemd's default
+# start limit, which failed both units until the next login.
+StartLimitIntervalSec=60
+StartLimitBurst=20
+
+[Service]
+Type=oneshot
+# Debounce: while this waits, further triggers join the same start, so one
+# burst of writes costs one pass (plus one no-op pass for this script's own rename).
+ExecStartPre=/usr/bin/sleep 3
+ExecStart=%h/.local/bin/omarchy-agent-usage-names

@@ -1,0 +1,10 @@
+[Unit]
+Description=Shorten Agents tab names when a usage record is written
+
+[Path]
+PathChanged=%h/.local/state/omarchy/agents/usage
+Unit=omarchy-agent-usage-names.service
+TriggerLimitIntervalSec=2
+
+[Install]
+WantedBy=default.target

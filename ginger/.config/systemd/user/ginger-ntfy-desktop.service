@@ -1,0 +1,13 @@
+[Unit]
+Description=Ginger: show ntfy pushes (dev notify) as desktop notifications
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/ginger-ntfy-desktop
+# The script reconnects by itself; this covers a crash.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
