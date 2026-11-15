@@ -6,20 +6,24 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// CPU and memory for this machine on the bar, and a dropdown with the same
-// for every device on the tailnet.
+// CPU and memory for this machine on the bar, then one pill per fleet box
+// (servers and ginger-dev boxes): its name, its T3 agents working and waiting,
+// and failing PRs. A box that is offline, or past a disk, swap or memory limit,
+// turns urgent and says why in place of its name. The dropdown has the same for
+// every device on the tailnet.
 //
-// The bar label reads /proc itself every two seconds; nothing is spawned for
-// it. The dropdown runs omarchy-tailnet-stats once when it opens and then
-// every refreshSeconds while it stays open, and never while it is closed. That
-// collector does the network work: the device list from Tailscale, and each
-// ginger-dev box's https://<box>/stats.json.
+// This machine's CPU and memory come from /proc every two seconds; nothing is
+// spawned for them. omarchy-tailnet-stats runs every pollSeconds (60) for the
+// pills, and every refreshSeconds while the dropdown is open. That collector
+// does the network work: the device list from Tailscale, and each ginger-dev
+// box's https://<box>/stats.json (about 400 bytes each).
 Panel {
   id: root
   moduleName: "ruttydm.tailnet"
   ipcTarget: "ruttydm.tailnet"
 
   readonly property int refreshSeconds: Math.max(10, Math.min(300, Number(setting("refreshSeconds", 15)) || 15))
+  readonly property int pollSeconds: Math.max(30, Math.min(600, Number(setting("pollSeconds", 60)) || 60))
   readonly property string btopCommand: String(setting("btopCommand", "omarchy-launch-or-focus-tui btop"))
   readonly property string collectorPath: (Quickshell.env("HOME") || "") + "/.local/bin/omarchy-tailnet-stats"
 
@@ -37,6 +41,8 @@ Panel {
   readonly property var groups: Model.grouped(devices)
   readonly property var flatDevices: Model.flat(groups)
   readonly property int onlineCount: Model.onlineCount(devices)
+  readonly property string troubleText: Model.problemSummary(devices, now)
+  readonly property var segments: Model.barSegments(localCpu, localMem, devices)
 
   property int cursorIndex: 0
   property bool cursorActive: false
@@ -44,15 +50,37 @@ Panel {
   readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property color dim: Qt.darker(fg, 1.55)
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
+  readonly property color accent: Commons.Color.accent
+  readonly property bool vertical: bar ? bar.vertical : false
+  // StyledText colours for the dropdown rows (always #rrggbb).
+  readonly property var htmlColors: ({ dim: hex(dim), accent: hex(accent), urgent: hex(urgent) })
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color hoverFill: bar ? Style.hoverFillFor(bar.foreground, Commons.Color.accent) : "transparent"
   readonly property color selectedFill: bar ? Style.selectedFillFor(bar.foreground, Commons.Color.accent) : "transparent"
 
   // The open-panel dot spans the label, as it does under the clock.
-  readonly property real openPanelIndicatorWidth: button.labelWidth
+  readonly property real openPanelIndicatorWidth: vertical ? button.labelWidth : segmentRow.implicitWidth
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  function hex(c) {
+    function h(v) { var s = Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16); return s.length < 2 ? "0" + s : s }
+    return "#" + h(c.r) + h(c.g) + h(c.b)
+  }
+
+  function roleColor(role) {
+    if (role === "urgent") return root.urgent
+    if (role === "accent") return root.accent
+    if (role === "dim") return root.dim
+    return root.barForeground
+  }
+
+  function openT3(device) {
+    if (!device || !device.t3Url) return
+    Qt.openUrlExternally(device.t3Url)
+    root.close()
+  }
 
   function sampleLocal() {
     statFile.reload()
@@ -74,6 +102,7 @@ Panel {
 
   function applyCollector(text) {
     root.loading = false
+    root.now = Date.now() / 1000
     try {
       var data = Model.parse(text)
       root.devices = data.devices
@@ -114,6 +143,7 @@ Panel {
       root.now = Date.now() / 1000
       root.cursorActive = false
       root.cursorIndex = 0
+      root.refresh()
     }
   }
 
@@ -128,9 +158,10 @@ Panel {
     onTriggered: root.sampleLocal()
   }
 
+  // Always running: the pills need the fleet whether or not the dropdown is open.
   Timer {
-    interval: root.refreshSeconds * 1000
-    running: root.opened
+    interval: (root.opened ? root.refreshSeconds : root.pollSeconds) * 1000
+    running: true
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()
@@ -165,11 +196,48 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: Model.barText(root.localCpu, root.localMem)
-    tooltipText: root.opened ? "" : Model.barTooltip(root.localCpu, root.localMem)
+    // The plain text keeps the button's own sizing and visibility rules; on a
+    // horizontal bar the coloured runs below are drawn instead of its label.
+    text: root.vertical ? Model.barText(root.localCpu, root.localMem) : Model.segmentsText(root.segments)
+    labelVisible: root.vertical
+    fixedWidth: root.vertical ? -1 : Math.ceil(segmentRow.implicitWidth + Style.spaceReal(7.5) * 2)
+    tooltipText: root.opened ? "" : (root.devices.length > 0
+      ? Model.fleetTooltip(root.localCpu, root.localMem, root.devices, root.now)
+      : Model.barTooltip(root.localCpu, root.localMem))
     horizontalMargin: 7.5
     verticalPadding: 6
     fontSize: 12
+
+    // The label as coloured runs. Same font and figure centring as WidgetButton's label.
+    Row {
+      id: segmentRow
+      visible: !root.vertical
+      anchors.centerIn: parent
+      anchors.verticalCenterOffset: (segmentMetrics.descent - segmentMetrics.ascent
+        + segmentMetrics.tightBoundingRect("0").height) / 2
+      scale: button.pressScale
+
+      Repeater {
+        model: root.segments
+        Text {
+          required property var modelData
+          textFormat: Text.PlainText
+          text: modelData.text
+          color: root.roleColor(modelData.role)
+          font.family: button.fontFamily
+          font.pixelSize: button.fontSize
+          font.bold: modelData.role === "bold"
+          renderType: Text.NativeRendering
+          Behavior on color { ColorAnimation { duration: Style.duration(160) } }
+        }
+      }
+    }
+
+    FontMetrics {
+      id: segmentMetrics
+      font.family: button.fontFamily
+      font.pixelSize: button.fontSize
+    }
 
     onPressed: function(b) {
       if (b === Qt.RightButton) {
@@ -197,7 +265,10 @@ Panel {
       onActivateRequested: if (root.cursorActive) root.activate(root.flatDevices[root.cursorIndex])
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onTextKey: function(t) { if (t === "r" || t === "R") root.refresh() }
+      onTextKey: function(t) {
+        if (t === "r" || t === "R") root.refresh()
+        else if ((t === "t" || t === "T") && root.cursorActive) root.openT3(root.flatDevices[root.cursorIndex])
+      }
 
       Flickable {
         anchors.fill: parent
@@ -240,6 +311,16 @@ Panel {
                 return parts.join(" · ")
               }
             }
+          }
+
+          // Everything that turns the bar urgent, in one line.
+          PlainText {
+            visible: root.troubleText !== ""
+            width: parent.width
+            text: root.troubleText
+            color: root.urgent
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.Wrap
           }
 
           PlainText {
@@ -291,9 +372,10 @@ Panel {
     elide: Text.ElideRight
   }
 
-  // A thin horizontal meter, urgent from 90%.
+  // A thin horizontal meter, urgent from `limit`.
   component Meter: Item {
     property int value: -1
+    property int limit: 90
     implicitWidth: Style.space(48)
     implicitHeight: Style.space(5)
 
@@ -308,7 +390,7 @@ Panel {
       height: parent.height
       radius: height / 2
       width: Math.max(height, parent.width * Math.max(0, parent.value) / 100)
-      color: parent.value >= 90 ? root.urgent : root.fg
+      color: parent.value >= parent.limit ? root.urgent : root.fg
       Behavior on width { NumberAnimation { duration: Style.duration(220); easing.type: Easing.OutCubic } }
     }
   }
@@ -317,13 +399,16 @@ Panel {
     property string label: ""
     property string value: ""
     property int pct: -1
+    property int limit: 90
+    // The dashboard chart a click on this vital opens.
+    property string metric: ""
     spacing: Style.space(8)
     layoutDirection: Qt.RightToLeft
 
-    Meter { value: parent.pct; anchors.verticalCenter: parent.verticalCenter }
+    Meter { value: parent.pct; limit: parent.limit; anchors.verticalCenter: parent.verticalCenter }
     PlainText {
       text: parent.value
-      color: parent.pct >= 90 ? root.urgent : root.fg
+      color: parent.pct >= parent.limit ? root.urgent : root.fg
       font.pixelSize: Style.font.bodySmall
       anchors.verticalCenter: parent.verticalCenter
     }
@@ -335,12 +420,24 @@ Panel {
     }
   }
 
+  // A small dim second line that may carry <font>/<b> from Model.js (always escaped there).
+  component StyledLine: Text {
+    textFormat: Text.StyledText
+    color: root.dim
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.bodySmall
+    leftPadding: Style.space(16)
+    elide: Text.ElideRight
+  }
+
   component DeviceRow: Item {
     id: row
     property var device: ({})
     readonly property var stats: device.stats || null
     readonly property bool selected: root.cursorActive && root.cursorIndex === device.index
     readonly property bool clickable: Model.canActivate(device)
+    readonly property bool urgentRow: Model.problems(device).length > 0
+    property bool overAgents: false
 
     implicitHeight: content.implicitHeight + Style.space(12)
 
@@ -356,7 +453,8 @@ Panel {
       anchors.leftMargin: Style.space(8)
       anchors.rightMargin: Style.space(8)
       implicitHeight: Math.max(left.implicitHeight, right.implicitHeight)
-      opacity: row.device.online ? 1 : 0.45
+      // An offline fleet box stays readable: it is the thing to look at.
+      opacity: row.device.online ? 1 : (row.urgentRow ? 0.85 : 0.45)
 
       Column {
         id: left
@@ -376,9 +474,9 @@ Panel {
             height: width
             radius: width / 2
             anchors.verticalCenter: parent.verticalCenter
-            color: row.device.online ? Commons.Color.accent : "transparent"
+            color: !row.device.online ? "transparent" : (row.urgentRow ? root.urgent : Commons.Color.accent)
             border.width: row.device.online ? 0 : 1
-            border.color: root.dim
+            border.color: row.urgentRow ? root.urgent : root.dim
           }
 
           PlainText {
@@ -396,12 +494,19 @@ Panel {
           }
         }
 
-        PlainText {
+        StyledLine {
           width: parent.width
-          leftPadding: Style.space(16)
-          text: Model.detail(row.device, root.now)
-          color: root.dim
-          font.pixelSize: Style.font.bodySmall
+          text: Model.detailHtml(row.device, root.now, root.htmlColors)
+        }
+
+        // T3 agents on this box; a click here opens its T3.
+        StyledLine {
+          id: agentsLine
+          visible: text !== ""
+          width: Math.min(implicitWidth, parent.width)
+          text: Model.agentsHtml(row.device, root.htmlColors)
+          color: root.fg
+          font.underline: row.overAgents && row.device.t3Url !== ""
         }
       }
 
@@ -416,14 +521,27 @@ Panel {
         Vital {
           anchors.right: parent.right
           label: "CPU"
+          metric: "cpu"
           value: row.stats ? row.stats.cpu + "%" : ""
           pct: row.stats ? row.stats.cpu : -1
         }
         Vital {
           anchors.right: parent.right
           label: "RAM"
+          metric: "mem"
+          limit: Model.LIMITS.mem
           value: row.stats ? Model.memLabel(row.stats) : ""
           pct: row.stats ? Model.percent(row.stats.memUsed, row.stats.memTotal) : -1
+        }
+        // Swap shares the dashboard's memory chart.
+        Vital {
+          anchors.right: parent.right
+          visible: row.stats !== null && row.stats.swapTotal > 0
+          label: "SWP"
+          metric: "mem"
+          limit: Model.LIMITS.swap
+          value: row.stats && row.stats.swapTotal > 0 ? Model.swapLabel(row.stats) : ""
+          pct: row.stats && row.stats.swapTotal > 0 ? Model.percent(row.stats.swapUsed, row.stats.swapTotal) : -1
         }
       }
     }
@@ -433,13 +551,25 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: row.clickable ? Qt.PointingHandCursor : Qt.ArrowCursor
-      // A click on the CPU or RAM meters opens that chart on the box's dashboard;
-      // anywhere else on the row keeps the row's own action.
+      function inside(item, x, y) {
+        if (!item.visible) return false
+        var p = mouse.mapToItem(item, x, y)
+        return p.x >= 0 && p.y >= 0 && p.x <= item.width && p.y <= item.height
+      }
+
+      // A click on the agents line opens the box's T3; on a meter, that chart on
+      // its dashboard; anywhere else on the row keeps the row's own action.
       onClicked: function(ev) {
-        var p = mouse.mapToItem(right, ev.x, ev.y)
-        var metric = right.visible && p.x >= 0 && p.y >= 0 && p.x <= right.width && p.y <= right.height
-          ? (p.y < right.height / 2 ? "cpu" : "mem") : ""
-        var url = metric ? Model.metricUrl(row.device, metric) : ""
+        if (row.device.t3Url && inside(agentsLine, ev.x, ev.y)) {
+          root.openT3(row.device)
+          return
+        }
+        var url = ""
+        if (inside(right, ev.x, ev.y)) {
+          var p = mouse.mapToItem(right, ev.x, ev.y)
+          var vital = right.childAt(right.width - 1, p.y)
+          if (vital && vital.metric) url = Model.metricUrl(row.device, vital.metric)
+        }
         if (url !== "") {
           Qt.openUrlExternally(url)
           root.close()
@@ -447,12 +577,16 @@ Panel {
           root.activate(row.device)
         }
       }
-      onContainsMouseChanged: if (containsMouse) { root.cursorActive = false }
+      onPositionChanged: function(ev) { row.overAgents = row.device.t3Url !== "" && inside(agentsLine, ev.x, ev.y) }
+      onContainsMouseChanged: {
+        if (containsMouse) root.cursorActive = false
+        else row.overAgents = false
+      }
     }
 
     PanelToolTip {
-      visible: mouse.containsMouse && row.clickable
-      text: Model.activateHint(row.device)
+      visible: mouse.containsMouse && (row.clickable || row.overAgents)
+      text: row.overAgents ? "Open " + row.device.t3Url.replace(/^https:\/\//, "") : Model.activateHint(row.device)
       fontFamily: root.fontFamily
     }
   }
