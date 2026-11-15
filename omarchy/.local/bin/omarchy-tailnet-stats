@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every device on the tailnet, with live CPU, memory, load and disk where a box serves them.
+"""Every device on the tailnet, with live CPU, memory, load, disk and agents where a box serves them.
 
 Prints one JSON document for the bar's tailnet dropdown (ruttydm.tailnet):
 
@@ -10,10 +10,13 @@ Where the data comes from:
     Phones and tablets (iOS, Android) and Mullvad exit nodes are left out.
   - Dev boxes are the entries in ginger-dev's boxes.toml, matched to devices by tailscale_ip. Each
     serves https://<domain>/stats.json on its tailnet IP only. All online boxes are fetched in parallel.
-  - This machine reads /proc directly, so it never depends on its own web server.
+  - This machine reads /proc directly, so it never depends on its own web server. Its T3 agent counts
+    come from ginger-dev's state file (<state>/agents.json), the same one its /stats.json serves.
+  - A box's stats.json carries `agents: {working, waiting, done}` and `ci: {failing}` for its T3, and a
+    box with a `t3` extra site gets `t3Url` https://t3.<domain>.
   - A device tagged with one of --server-tag (default tag:server) goes in the "server" group.
 
-Run by the panel only while the dropdown is open. Everything fetched is validated and bounded
+Run by the panel once a minute, and more often while the dropdown is open. Everything fetched is validated and bounded
 before it is printed; nothing fetched is ever executed or put into a shell command.
 """
 from __future__ import annotations
@@ -37,6 +40,7 @@ HIDDEN_OS = {"ios", "android", "tvos", "ipados"}
 MAX_STATS_BYTES = 64 * 1024
 FETCH_TIMEOUT = 5.0
 NAME_RE = re.compile(r"^[A-Za-z0-9 ._'’()-]{1,64}$")
+AGENTS_MAX_AGE = 600
 DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
 
 
@@ -85,6 +89,25 @@ def local_stats(proc: Path = Path("/proc"), sys_root: Path = Path("/sys"), sampl
     }
 
 
+def state_dir() -> Path:
+    return Path(os.environ.get("GINGER_DEV_STATE") or Path.home() / ".local/state/ginger-dev").expanduser()
+
+
+def local_agents(state: Path | None = None, now: float | None = None) -> dict:
+    """This machine's T3 counts in the /stats.json shape, from the file `dev refresh` keeps fresh."""
+    now = time.time() if now is None else now
+    try:
+        raw = json.loads(((state or state_dir()) / "agents.json").read_text()[:4096])
+    except (OSError, ValueError):
+        return {}
+    ts = raw.get("ts") if isinstance(raw, dict) else None
+    if not isinstance(raw, dict) or raw.get("v") != 1 or isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return {}
+    if not now - AGENTS_MAX_AGE <= ts <= now + 60:
+        return {}
+    return {"agents": {k: raw.get(k) for k in ("working", "waiting", "done")}, "ci": raw.get("ci")}
+
+
 # ------------------------------------------------------------- validation
 
 def _num(value, lo: float = 0, hi: float = float("inf")) -> float | None:
@@ -104,6 +127,8 @@ def clean_stats(raw) -> dict | None:
     swap = raw.get("swap") if isinstance(raw.get("swap"), dict) else {}
     disk = raw.get("disk") if isinstance(raw.get("disk"), dict) else {}
     load = raw.get("load") if isinstance(raw.get("load"), list) else []
+    agents = raw.get("agents") if isinstance(raw.get("agents"), dict) else None
+    ci = raw.get("ci") if isinstance(raw.get("ci"), dict) else {}
     out = {
         "cpu": _num(cpu.get("pct"), 0, 100),
         "cores": _num(cpu.get("cores"), 1, 4096),
@@ -120,9 +145,18 @@ def clean_stats(raw) -> dict | None:
     if out["cpu"] is None or out["memTotal"] is None or out["memAvailable"] is None:
         return None
     out["memAvailable"] = min(out["memAvailable"], out["memTotal"])
+    if out["swapTotal"] is not None and out["swapFree"] is not None:
+        out["swapFree"] = min(out["swapFree"], out["swapTotal"])
+    # Whole counts only; a box without agents info (older ginger-dev, no T3) has none.
+    out["agents"] = {k: _count(agents.get(k)) for k in ("working", "waiting", "done")} if agents else None
+    out["ciFailing"] = _count(ci.get("failing"))
     if out["diskTotal"] is not None and out["diskUsed"] is not None:
         out["diskUsed"] = min(out["diskUsed"], out["diskTotal"])
     return out
+
+
+def _count(value) -> int:
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100_000 else 0
 
 
 def safe_name(value, fallback: str = "") -> str:
@@ -153,7 +187,7 @@ def boxes_file(explicit: str = "") -> Path | None:
 
 
 def load_boxes(path: Path | None) -> dict[str, dict]:
-    """tailscale IP -> {name, domain}, for boxes with a valid domain."""
+    """tailscale IP -> {name, domain, t3}, for boxes with a valid domain. t3: https://t3.<domain> serves T3."""
     if not path:
         return {}
     try:
@@ -167,7 +201,8 @@ def load_boxes(path: Path | None) -> dict[str, dict]:
         ip = str(cfg.get("tailscale_ip") or "")
         domain = str(cfg.get("domain") or "").lower()
         if ip and DOMAIN_RE.match(domain) and NAME_RE.match(str(name)):
-            out[ip] = {"name": str(name), "domain": domain}
+            sites = cfg.get("extra_sites") if isinstance(cfg.get("extra_sites"), dict) else {}
+            out[ip] = {"name": str(name), "domain": domain, "t3": "t3" in sites}
     return out
 
 
@@ -219,13 +254,15 @@ def device(node: dict, *, is_self: bool, boxes: dict, server_tags: set[str]) -> 
         "group": group,
         "lastSeen": last_seen_epoch,
         "url": f"https://{box['domain']}" if box else "",
+        "t3Url": f"https://t3.{box['domain']}" if box and box.get("t3") else "",
         "statsUrl": f"https://{box['domain']}/stats.json" if box else "",
         "stats": None,
         "error": "",
     }
 
 
-def collect(status: dict, boxes: dict, server_tags: set[str], fetch=fetch_stats, local=local_stats) -> dict:
+def collect(status: dict, boxes: dict, server_tags: set[str], fetch=fetch_stats, local=None) -> dict:
+    local = local or (lambda: {**local_stats(), **local_agents()})
     devices = []
     me = status.get("Self") or {}
     if me:

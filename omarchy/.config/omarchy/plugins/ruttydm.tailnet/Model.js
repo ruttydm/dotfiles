@@ -9,6 +9,15 @@
 var CPU_ICON = ""
 var RAM_ICON = "󰘚"
 
+// Agent marks: working (play), waiting for you (pause), done (check); a failing PR is a plain ✗.
+var WORK_ICON = String.fromCodePoint(0xF040A)
+var WAIT_ICON = String.fromCodePoint(0xF03E4)
+var DONE_ICON = String.fromCodePoint(0xF012C)
+var FAIL_MARK = "\u2717"
+
+// A fleet box turns urgent on the bar at these percentages, or when it is offline.
+var LIMITS = { disk: 90, swap: 80, mem: 95 }
+
 var GROUPS = [
   { key: "server", title: "Servers" },
   { key: "dev", title: "Dev boxes" },
@@ -123,6 +132,8 @@ function cleanStats(raw) {
   var memTotal = num(raw.memTotal, 1, 1e16)
   var memAvailable = num(raw.memAvailable, 0, 1e16)
   if (cpu === null || memTotal === null || memAvailable === null) return null
+  var swapTotal = num(raw.swapTotal, 0, 1e16)
+  var swapFree = num(raw.swapFree, 0, 1e16)
   var load = Array.isArray(raw.load) ? raw.load.slice(0, 3).map(function(v) { return num(v, 0, 1e5) }).filter(function(v) { return v !== null }) : []
   return {
     cpu: Math.round(cpu),
@@ -133,8 +144,24 @@ function cleanStats(raw) {
     diskTotal: num(raw.diskTotal, 1, 1e18),
     diskUsed: num(raw.diskUsed, 0, 1e18),
     tempC: num(raw.tempC, -50, 200),
-    uptime: num(raw.uptime, 0, 1e12)
+    uptime: num(raw.uptime, 0, 1e12),
+    swapTotal: swapTotal || 0,
+    swapUsed: swapTotal > 0 && swapFree !== null ? Math.max(0, swapTotal - Math.min(swapFree, swapTotal)) : 0,
+    agents: cleanAgents(raw.agents),
+    ciFailing: count(raw.ciFailing)
   }
+}
+
+// A whole count from JSON: numbers only (no "9", no true), 0 when absent or out of range.
+function count(value) {
+  var n = typeof value === "number" ? num(value, 0, 1e5) : null
+  return n === null ? 0 : Math.floor(n)
+}
+
+// { working, waiting, done } or null when the box reports no agents (no T3, older ginger-dev).
+function cleanAgents(raw) {
+  if (!raw || typeof raw !== "object") return null
+  return { working: count(raw.working), waiting: count(raw.waiting), done: count(raw.done) }
 }
 
 // The collector's output, parsed and bounded. Throws on anything that is not
@@ -149,6 +176,8 @@ function parse(text) {
     var group = d.group === "server" || d.group === "dev" ? d.group : "other"
     var url = str(d.url, 200)
     if (!/^https:\/\/[a-z0-9.-]+$/.test(url)) url = ""
+    var t3Url = str(d.t3Url, 200)
+    if (!/^https:\/\/t3\.[a-z0-9.-]+$/.test(t3Url)) t3Url = ""
     devices.push({
       id: str(d.id, 120) || ("device-" + i),
       name: str(d.name, 64) || "device",
@@ -159,6 +188,7 @@ function parse(text) {
       group: group,
       lastSeen: num(d.lastSeen, 0, 1e11) || 0,
       url: url,
+      t3Url: t3Url,
       stats: cleanStats(d.stats),
       error: str(d.error, 40)
     })
@@ -246,11 +276,195 @@ function activateHint(d) {
   return ""
 }
 
+// ---------------------------------------------------------------- fleet
+
+// The boxes the bar watches: servers and dev boxes other than this machine.
+function isFleet(d) {
+  return !d.self && (d.group === "dev" || d.group === "server")
+}
+
+// Why a device needs attention, as short phrases ("swap 98%", "off"); empty when it is fine.
+// Offline only counts for fleet boxes; this machine is never offline to itself.
+function problems(d) {
+  if (!d) return []
+  if (!d.online) return isFleet(d) ? ["off"] : []
+  var s = d.stats
+  if (!s || !(isFleet(d) || d.self)) return []
+  var out = []
+  var disk = percent(s.diskUsed, s.diskTotal)
+  if (disk >= LIMITS.disk) out.push("disk " + disk + "%")
+  var swap = s.swapTotal > 0 ? percent(s.swapUsed, s.swapTotal) : -1
+  if (swap >= LIMITS.swap) out.push("swap " + swap + "%")
+  var mem = percent(s.memUsed, s.memTotal)
+  if (mem >= LIMITS.mem) out.push("mem " + mem + "%")
+  return out
+}
+
+function agentsOf(d) {
+  var a = d && d.stats && d.online ? d.stats.agents : null
+  return a || { working: 0, waiting: 0, done: 0 }
+}
+
+function failingOf(d) {
+  return d && d.stats && d.online ? d.stats.ciFailing || 0 : 0
+}
+
+// One pill per fleet box, plus this machine when it has agents or a problem.
+function pills(devices) {
+  var out = []
+  for (var i = 0; i < devices.length; i++) {
+    var d = devices[i]
+    if (!isFleet(d) && !d.self) continue
+    var a = agentsOf(d)
+    var p = {
+      name: d.name, problems: problems(d), working: a.working, waiting: a.waiting, failing: failingOf(d),
+      unknown: d.online && !d.self && d.url !== "" && !d.stats
+    }
+    if (d.self && p.problems.length === 0 && p.working + p.waiting + p.failing === 0) continue
+    out.push(p)
+  }
+  return out
+}
+
+// The bar label as coloured runs: [{ text, role }] with role fg | dim | bold | accent | urgent.
+// The local CPU and memory come first, unchanged; each pill follows two spaces after.
+function barSegments(cpu, mem, devices) {
+  var out = [{ text: barText(cpu, mem), role: "fg" }]
+  var list = pills(devices || [])
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i]
+    var busy = p.working + p.waiting + p.failing > 0
+    out.push({ text: "  ", role: "fg" })
+    if (p.problems.length > 0) out.push({ text: p.name + " " + p.problems.join(" "), role: "urgent" })
+    else out.push({ text: p.name, role: busy ? "bold" : "dim" })
+    if (p.unknown && p.problems.length === 0) out.push({ text: "?", role: "dim" })
+    if (p.working > 0) {
+      out.push({ text: " " + p.working, role: "fg" })
+      out.push({ text: WORK_ICON, role: "dim" })
+    }
+    if (p.waiting > 0) out.push({ text: " " + p.waiting + WAIT_ICON, role: "accent" })
+    if (p.failing > 0) out.push({ text: " " + FAIL_MARK + p.failing, role: "urgent" })
+  }
+  return out
+}
+
+function segmentsText(segments) {
+  var s = ""
+  for (var i = 0; i < segments.length; i++) s += segments[i].text
+  return s
+}
+
+function urgentCount(devices) {
+  var n = 0
+  for (var i = 0; i < devices.length; i++) if (problems(devices[i]).length > 0) n++
+  return n
+}
+
+// "rz swap 98% · pi offline 4 min": every problem on one line, for the dropdown and the tooltip.
+function problemSummary(devices, now) {
+  var parts = []
+  for (var i = 0; i < devices.length; i++) {
+    var d = devices[i]
+    var list = problems(d)
+    if (list.length === 0) continue
+    if (!d.online) {
+      var seen = ago(d.lastSeen, now)
+      parts.push(d.name + " offline" + (seen && seen !== "just now" ? " since " + seen.replace(/ ago$/, "") : ""))
+    } else {
+      parts.push(d.name + " " + list.join(", "))
+    }
+  }
+  var failing = 0
+  for (var j = 0; j < devices.length; j++) failing += failingOf(devices[j])
+  if (failing > 0) parts.push(failing + (failing === 1 ? " PR" : " PRs") + " failing")
+  return parts.join(" · ")
+}
+
+// "3 working · 1 waiting · 2 done · 1 PR failing", or "" for a box that reports no agents.
+function agentsLine(d) {
+  if (!d || !d.online || !d.stats || !d.stats.agents) return ""
+  var a = d.stats.agents
+  var parts = []
+  if (a.working > 0) parts.push(a.working + " working")
+  if (a.waiting > 0) parts.push(a.waiting + " waiting")
+  if (a.done > 0) parts.push(a.done + " done")
+  var f = failingOf(d)
+  if (f > 0) parts.push(f + (f === 1 ? " PR" : " PRs") + " failing")
+  return parts.length > 0 ? parts.join(" · ") : "no agents running"
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+}
+
+function tint(text, color) {
+  return '<font color="' + escapeHtml(color) + '">' + escapeHtml(text) + "</font>"
+}
+
+// The agents line as StyledText: waiting in the accent colour, failing PRs urgent, the rest plain.
+function agentsHtml(d, colors) {
+  if (!agentsLine(d)) return ""
+  var a = d.stats.agents
+  var parts = []
+  if (a.working > 0) parts.push(escapeHtml(a.working + " ") + tint(WORK_ICON + " working", colors.dim))
+  if (a.waiting > 0) parts.push("<b>" + tint(a.waiting + WAIT_ICON + " waiting", colors.accent) + "</b>")
+  if (a.done > 0) parts.push(escapeHtml(a.done + " ") + tint(DONE_ICON + " done", colors.dim))
+  var f = failingOf(d)
+  if (f > 0) parts.push(tint(FAIL_MARK + f + (f === 1 ? " PR" : " PRs") + " failing", colors.urgent))
+  if (parts.length === 0) return tint("no agents running", colors.dim)
+  var html = parts.join(tint(" · ", colors.dim))
+  return d.t3Url ? html + tint("  \u2197 t3", colors.dim) : html
+}
+
+// The vitals line as StyledText, with the number that breaks a limit in the urgent colour.
+function detailHtml(d, now, colors) {
+  if (!d.online) {
+    var text = detail(d, now)
+    return problems(d).length > 0 ? tint(text, colors.urgent) : escapeHtml(text)
+  }
+  var s = d.stats
+  if (!s) return escapeHtml(detail(d, now))
+  var parts = []
+  if (s.load.length > 0) parts.push(escapeHtml("load " + s.load[0].toFixed(2)))
+  var disk = percent(s.diskUsed, s.diskTotal)
+  if (disk >= 0) parts.push("disk " + (disk >= LIMITS.disk ? tint(disk + "%", colors.urgent) : disk + "%"))
+  if (s.tempC !== null) parts.push(Math.round(s.tempC) + "°C")
+  if (s.uptime !== null) parts.push(escapeHtml("up " + duration(s.uptime)))
+  return parts.join(" · ")
+}
+
+function swapLabel(s) {
+  return gib(s.swapUsed) + " / " + gib(s.swapTotal) + " GiB"
+}
+
+// The bar's tooltip once the fleet is known: this machine, then what needs attention, then agents.
+function fleetTooltip(cpu, mem, devices, now) {
+  var lines = ["CPU " + (cpu >= 0 ? cpu + "%" : "–")]
+  if (mem) lines.push("Memory " + gib(mem.used) + " / " + gib(mem.total) + " GiB")
+  var trouble = problemSummary(devices || [], now)
+  if (trouble) lines.push("", trouble)
+  var agentLines = []
+  for (var i = 0; i < (devices || []).length; i++) {
+    var line = agentsLine(devices[i])
+    if (line && line !== "no agents running") agentLines.push(devices[i].name + ": " + line)
+  }
+  if (agentLines.length > 0) {
+    lines.push("", "Agents")
+    lines = lines.concat(agentLines)
+  }
+  lines.push("", "Click for every device on the tailnet")
+  return lines.join("\n")
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     cpuTimes: cpuTimes, cpuPercent: cpuPercent, memory: memory, barText: barText, barTooltip: barTooltip,
     gib: gib, percent: percent, ago: ago, duration: duration, updatedLabel: updatedLabel,
     parse: parse, grouped: grouped, flat: flat, onlineCount: onlineCount, subtitle: subtitle,
-    detail: detail, memLabel: memLabel, canActivate: canActivate, activateHint: activateHint, metricUrl: metricUrl
+    detail: detail, memLabel: memLabel, canActivate: canActivate, activateHint: activateHint, metricUrl: metricUrl,
+    LIMITS: LIMITS, WORK_ICON: WORK_ICON, WAIT_ICON: WAIT_ICON, DONE_ICON: DONE_ICON,
+    isFleet: isFleet, problems: problems, pills: pills, barSegments: barSegments, segmentsText: segmentsText,
+    urgentCount: urgentCount, problemSummary: problemSummary, agentsLine: agentsLine, agentsHtml: agentsHtml,
+    detailHtml: detailHtml, swapLabel: swapLabel, fleetTooltip: fleetTooltip, escapeHtml: escapeHtml
   }
 }

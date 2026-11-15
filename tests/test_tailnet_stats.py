@@ -91,8 +91,39 @@ class ValidationTests(unittest.TestCase):
         f.write_text('[boxes.pi]\ntailscale_ip = "100.0.0.2"\ndomain = "pi.example.cc"\n'
                      '[boxes.bad]\ntailscale_ip = "100.0.0.9"\ndomain = "evil.cc/x?"\n'
                      '[boxes.nodomain]\ntailscale_ip = "100.0.0.8"\n')
-        self.assertEqual(ts.load_boxes(f), {"100.0.0.2": {"name": "pi", "domain": "pi.example.cc"}})
+        f.write_text(f.read_text() + '[boxes.rz]\ntailscale_ip = "100.0.0.3"\ndomain = "rz.example.cc"\n'
+                     '[boxes.rz.extra_sites]\nt3 = "127.0.0.1:3773"\n')
+        self.assertEqual(ts.load_boxes(f), {"100.0.0.2": {"name": "pi", "domain": "pi.example.cc", "t3": False},
+                                            "100.0.0.3": {"name": "rz", "domain": "rz.example.cc", "t3": True}})
         self.assertEqual(ts.load_boxes(None), {})
+
+    def test_agents_and_swap(self):
+        stats = ts.clean_stats({**GOOD, "agents": {"working": 3, "waiting": 1, "done": 2}, "ci": {"failing": 1},
+                                "swap": {"total": 100, "free": 900}})
+        self.assertEqual(stats["agents"], {"working": 3, "waiting": 1, "done": 2})
+        self.assertEqual(stats["ciFailing"], 1)
+        self.assertEqual(stats["swapFree"], 100)
+        bad = ts.clean_stats({**GOOD, "agents": {"working": "3", "waiting": True, "done": -1}, "ci": [1]})
+        self.assertEqual(bad["agents"], {"working": 0, "waiting": 0, "done": 0})
+        self.assertEqual(bad["ciFailing"], 0)
+        self.assertIsNone(ts.clean_stats(GOOD)["agents"])  # older ginger-dev, or no T3
+
+    def test_local_agents(self):
+        d = Path(tempfile.mkdtemp())
+        self.assertEqual(ts.local_agents(d, 1000), {})
+        (d / "agents.json").write_text('{"v":1,"ts":900,"working":2,"waiting":0,"done":1,"ci":{"failing":0}}')
+        self.assertEqual(ts.clean_stats({**GOOD, **ts.local_agents(d, 1000)})["agents"],
+                         {"working": 2, "waiting": 0, "done": 1})
+        self.assertEqual(ts.local_agents(d, 900 + 601), {})  # stale: dev refresh stopped
+        (d / "agents.json").write_text("[1]")
+        self.assertEqual(ts.local_agents(d, 1000), {})
+
+    def test_t3_url_only_for_boxes_with_t3(self):
+        boxes = {**BOXES, "100.0.0.2": {**BOXES["100.0.0.2"], "t3": True}}
+        out = ts.collect(STATUS, boxes, {"tag:server"}, fetch=lambda u: (None, "x"), local=lambda: GOOD)
+        by = {d["name"]: d for d in out["devices"]}
+        self.assertEqual(by["pi"]["t3Url"], "https://t3.pi.example.cc")
+        self.assertEqual(by["tp"]["t3Url"], "")
 
     def test_local_stats_shape(self):
         stats = ts.clean_stats(ts.local_stats(sample=0.05))

@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "ruttydm.tailnet",
   "name": "Tailnet stats",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "ruttydm",
-  "description": "CPU and memory for this machine on the bar; click for CPU, memory, load and disk of every device on the tailnet.",
+  "description": "CPU and memory for this machine, then each fleet box's health and T3 agents on the bar; click for every device on the tailnet.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,12 +13,13 @@
   },
   "barWidget": {
     "displayName": "Tailnet stats",
-    "description": "This machine's CPU and memory; the dropdown lists every tailnet device with live stats from ginger-dev boxes.",
+    "description": "This machine's CPU and memory, a pill per server and dev box with its agents (urgent when a box is down or full); the dropdown lists every tailnet device.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "refreshSeconds": 15
+      "refreshSeconds": 15,
+      "pollSeconds": 60
     },
     "schema": [
       {
@@ -29,6 +30,15 @@
         "max": 300,
         "step": 5,
         "defaultValue": 15
+      },
+      {
+        "key": "pollSeconds",
+        "type": "integer",
+        "label": "Fleet check while closed (seconds)",
+        "min": 30,
+        "max": 600,
+        "step": 10,
+        "defaultValue": 60
       }
     ]
   }

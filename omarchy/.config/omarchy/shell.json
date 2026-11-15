@@ -53,10 +53,6 @@
           "id": "omarchy.tailscale"
         },
         {
-          "id": "njpatel.omaherdr",
-          "barIcon": "dashboard"
-        },
-        {
           "id": "omarchy.agents",
           "providers": {
             "claude": { "enabled": true },

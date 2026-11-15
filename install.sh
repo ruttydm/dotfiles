@@ -70,8 +70,6 @@ install_omarchy_extra_plugins() {
   omarchy plugin enable huacnlee.which-key --section right --after omarchy.tray
   ensure_which_key_integration
   omarchy plugin enable omarchy.tailscale --section right --after huacnlee.which-key
-  ensure_omarchy_git_plugin njpatel.omaherdr https://github.com/njpatel/omaherdr.git
-  omarchy plugin enable njpatel.omaherdr --section right --after omarchy.tailscale
   # Service plugin: Grok and Cursor tabs in the stock Agents panel. shell.json
   # lists it, so do not --enable here (that rewrites the whole bar config).
   if [[ ! -d "$HOME/.config/omarchy/plugins/omarchy-spacexai-usage" ]]; then
