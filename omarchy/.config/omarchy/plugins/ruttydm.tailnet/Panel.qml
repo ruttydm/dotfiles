@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -24,13 +25,15 @@ import "Model.js" as Model
 // - omarchy-tailnet-stats (Tailscale's device list, disk, temperature), once
 //   at start and then every 30 minutes.
 // While the dropdown is open the collector also runs every refreshSeconds.
+// While the session is locked nothing above runs: each tick only asks
+// Hyprland (over its socket, no process) whether the lock is still there.
 Panel {
   id: root
   moduleName: "ruttydm.tailnet"
   ipcTarget: "ruttydm.tailnet"
 
   readonly property int refreshSeconds: Math.max(10, Math.min(300, Number(setting("refreshSeconds", 15)) || 15))
-  // Nothing polls while the screen is locked (see the lock FileView below).
+  // Nothing polls while the session is locked (checkLock).
   property bool paused: false
   readonly property int pollSeconds: Math.max(30, Math.min(600, Number(setting("pollSeconds", 60)) || 60))
   readonly property string btopCommand: String(setting("btopCommand", "omarchy-launch-or-focus-tui btop"))
@@ -136,6 +139,17 @@ Panel {
     for (var k in root.polls) next[k] = root.polls[k]
     next[id] = state
     root.polls = next
+  }
+
+  // Locked when any monitor lists LOCK in solitaryBlockedBy, as Omarchy's own
+  // omarchy-hyprland-session-locked checks. Reads the monitor objects from the
+  // last refresh and asks Hyprland for fresh ones for the next check.
+  function checkLock() {
+    var objs = []
+    var ms = Hyprland.monitors.values
+    for (var i = 0; i < ms.length; i++) objs.push(ms[i].lastIpcObject)
+    root.paused = Model.sessionLocked(objs)
+    Hyprland.refreshMonitors()
   }
 
   // One tick: this machine from /proc and agents.json, then every fleet box that is due.
@@ -247,13 +261,37 @@ Panel {
     onTriggered: root.sampleLocal()
   }
 
-  // The fleet poll: in-process, no process started.
+  // The fleet poll: in-process, no process started. Keeps ticking while locked,
+  // but then only checks whether the lock is still there.
   Timer {
     interval: root.pollSeconds * 1000
-    running: !root.paused
+    running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.pollFleet()
+    onTriggered: {
+      root.checkLock()
+      if (!root.paused) root.pollFleet()
+    }
+  }
+
+  // While locked, Hyprland's events (unlocking sends several) prompt a quick
+  // recheck, so the bar wakes within a second of unlocking, not a minute.
+  Connections {
+    target: Hyprland
+    enabled: root.paused
+    function onRawEvent(event) { if (!lockRecheck.running) lockRecheck.restart() }
+  }
+
+  Timer {
+    id: lockRecheck
+    interval: 1000
+    onTriggered: {
+      root.checkLock()
+      if (!root.paused) {
+        root.sampleLocal()
+        root.pollFleet()
+      }
+    }
   }
 
   Timer {

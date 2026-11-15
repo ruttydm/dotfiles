@@ -288,3 +288,10 @@ test("this machine: live memory and swap, agents from agents.json while fresh", 
   assert.deepEqual(plain(M.rawProblems({ self: true, online: true, group: "dev", stats: s })), ["swap 100%"])
   assert.equal(M.selfStats(prev, 30, null, null), prev)
 })
+
+test("session lock from Hyprland's monitor objects", () => {
+  assert.equal(M.sessionLocked([{ solitaryBlockedBy: ["OPAQUE", "OVERLAYS"] }]), false)
+  assert.equal(M.sessionLocked([{ solitaryBlockedBy: ["OPAQUE"] }, { solitaryBlockedBy: ["LOCK", "WORKSPACE"] }]), true)
+  assert.equal(M.sessionLocked([{}, null]), false)
+  assert.equal(M.sessionLocked(undefined), false)
+})

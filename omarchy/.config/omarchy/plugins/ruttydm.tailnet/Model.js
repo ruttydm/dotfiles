@@ -593,6 +593,17 @@ function withPolls(devices, polls, updated) {
   return out
 }
 
+// Whether the session is locked, from Hyprland's monitor objects (`hyprctl -j monitors`): a lock
+// is one of the reasons a monitor cannot go solitary. The same test as omarchy-hyprland-session-locked.
+function sessionLocked(monitorObjects) {
+  var list = Array.isArray(monitorObjects) ? monitorObjects : []
+  for (var i = 0; i < list.length; i++) {
+    var blocked = list[i] && Array.isArray(list[i].solitaryBlockedBy) ? list[i].solitaryBlockedBy : []
+    if (blocked.indexOf("LOCK") >= 0) return true
+  }
+  return false
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     cpuTimes: cpuTimes, cpuPercent: cpuPercent, memory: memory, barText: barText, barTooltip: barTooltip,
@@ -605,6 +616,6 @@ if (typeof module !== "undefined") {
     detailHtml: detailHtml, swapLabel: swapLabel, fleetTooltip: fleetTooltip, escapeHtml: escapeHtml,
     POLL: POLL, newPoll: newPoll, statsUrl: statsUrl, pollTargets: pollTargets, due: due, observe: observe,
     fromStatsJson: fromStatsJson, localAgents: localAgents, selfStats: selfStats, withPolls: withPolls,
-    rawProblems: rawProblems
+    rawProblems: rawProblems, sessionLocked: sessionLocked
   }
 }
