@@ -1,13 +1,20 @@
 [Unit]
-Description=Ginger: show ntfy pushes (dev notify) as desktop notifications
+Description=Ginger: show high-priority ntfy pushes (dev notify) on the desktop
 PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
 ExecStart=%h/.local/bin/ginger-ntfy-desktop
-# The script reconnects by itself; this covers a crash.
+# Stay out of the way: lowest CPU and IO priority, a hard memory cap.
+Nice=19
+IOSchedulingClass=idle
+MemoryMax=48M
+# The script reconnects by itself (5 s up to 5 min). If it crashes, systemd
+# restarts it with its own backoff: 10 s, growing to 10 minutes.
 Restart=always
-RestartSec=5
+RestartSec=10s
+RestartSteps=6
+RestartMaxDelaySec=10min
 
 [Install]
 WantedBy=graphical-session.target

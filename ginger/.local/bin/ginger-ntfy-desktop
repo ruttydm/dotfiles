@@ -1,25 +1,33 @@
 #!/usr/bin/env python3
-"""Show Ginger's ntfy pushes (`dev notify`) as desktop notifications.
+"""Show only the ntfy pushes that matter (`dev notify`) as desktop notifications.
 
-Subscribes to the topic on the tailnet ntfy server and passes each message to
-notify-send: title, text, priority (as urgency) and the click URL. Clicking
-the notification opens that URL. Runs as the ginger-ntfy-desktop user service.
+One long-lived process holds ntfy's JSON stream open (HTTP streaming, not
+polling) and decides per message:
 
-The stream is plain HTTPS (ntfy's JSON stream), so no ntfy client is needed.
-ntfy sends a keepalive every 45 seconds; a read that stays silent longer than
-READ_TIMEOUT means the connection died (sleep, network change), and the loop
-reconnects. Each reconnect asks for messages since the last one seen, capped at
-MAX_BACKLOG, so a push sent while the laptop slept still shows, but a long
-sleep does not replay a day of old pushes.
+  shown       priority >= min_priority (default 4: high and urgent), or tagged
+              with desktop_tag (default "desktop"). notify-send gets the title,
+              text, urgency and click URL; clicking opens the URL.
+  suppressed  everything else, written as one line to the suppressed log
+              instead: lower priority, the same title and text again within
+              DEDUP_SECONDS, or a push older than MAX_BACKLOG.
+
+Settings live in ~/.config/ginger-ntfy-desktop.conf (`key=value` lines). They
+are re-read when the file changes, so no restart is needed:
+
+  min_priority=4      # 1-5; 3 also shows default-priority pushes
+  desktop_tag=desktop # pushes with this tag always show
+
+  ginger-ntfy-desktop log [N]   the last N suppressed pushes (default 20)
+
+Reconnects resume with since=<last message id>, so nothing already handled is
+replayed. ntfy sends a keepalive every 45 s; READ_TIMEOUT of silence means the
+connection died (sleep, network change). Retries back off from 5 s to 5 min.
 """
 
 from __future__ import annotations
 
-import html
 import json
 import os
-import shutil
-import socket
 import subprocess
 import sys
 import threading
@@ -30,22 +38,70 @@ from pathlib import Path
 
 URL = os.environ.get("GINGER_NTFY_URL", "https://ntfy.rz.afai.cc").rstrip("/")
 TOPIC = os.environ.get("GINGER_NTFY_TOPIC", "rutger")
-READ_TIMEOUT = 75          # seconds; ntfy keepalive is 45
-MAX_BACKLOG = 3600         # seconds of missed pushes to replay after a reconnect
-STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "ginger-ntfy-desktop" / "last.json"
+READ_TIMEOUT = 75          # seconds; ntfy's keepalive is 45
+MAX_BACKLOG = 3600         # a push older than this when it arrives is stale
+DEDUP_SECONDS = 600        # the same title and text again within this is a duplicate
+MAX_WAITING = 4            # notify-send processes waiting for a click at once
+LOG_MAX_BYTES = 256 * 1024
+DEFAULTS = {"min_priority": "4", "desktop_tag": "desktop"}
+
+HOME = Path.home()
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "ginger-ntfy-desktop"
+LAST = STATE_DIR / "last.json"
+LOG = STATE_DIR / "suppressed.log"
+CONF = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "ginger-ntfy-desktop.conf"
 
 
-def urgency(priority: object) -> str:
-    """ntfy priority 1-5 to a notify-send urgency. 5 (max) stays until dismissed."""
+# --- settings -------------------------------------------------------------------------------------
+
+_conf_cache: tuple[float, dict[str, str]] = (-1.0, dict(DEFAULTS))
+
+
+def parse_conf(text: str) -> dict[str, str]:
+    conf = dict(DEFAULTS)
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if "=" in line:
+            key, value = (part.strip() for part in line.split("=", 1))
+            if key in DEFAULTS:
+                conf[key] = value
+    return conf
+
+
+def settings() -> dict[str, str]:
+    """The conf file, re-read only when its mtime changes (one stat per push)."""
+    global _conf_cache
     try:
-        p = int(priority)
+        mtime = CONF.stat().st_mtime
+    except OSError:
+        return dict(DEFAULTS)
+    if mtime != _conf_cache[0]:
+        try:
+            _conf_cache = (mtime, parse_conf(CONF.read_text()))
+        except OSError:
+            return dict(DEFAULTS)
+    return _conf_cache[1]
+
+
+def min_priority(conf: dict[str, str]) -> int:
+    try:
+        return max(1, min(5, int(conf["min_priority"])))
+    except (KeyError, ValueError):
+        return 4
+
+
+# --- deciding ------------------------------------------------------------------------------------
+
+def priority(msg: dict) -> int:
+    try:
+        return int(msg.get("priority") or 3)
     except (TypeError, ValueError):
-        p = 3
-    if p >= 5:
-        return "critical"
-    if p <= 2:
-        return "low"
-    return "normal"
+        return 3
+
+
+def urgency(p: int) -> str:
+    """ntfy priority to a notify-send urgency. 5 (urgent) stays until dismissed."""
+    return "critical" if p >= 5 else "low" if p <= 2 else "normal"
 
 
 def click_url(msg: dict) -> str:
@@ -58,101 +114,157 @@ def click_url(msg: dict) -> str:
     return url if urllib.parse.urlparse(url).scheme in ("http", "https") else ""
 
 
-def notify_args(msg: dict) -> list[str]:
-    """The notify-send command for one ntfy message. The body is escaped: Omarchy's
+class Gate:
+    """Decides show or suppress for each message. Remembers what it saw for DEDUP_SECONDS."""
+
+    def __init__(self) -> None:
+        self.seen_ids: dict[str, float] = {}
+        self.recent: dict[str, float] = {}
+
+    def verdict(self, msg: dict, conf: dict[str, str], now: float) -> str:
+        """"show", or the reason it is suppressed."""
+        mid = msg.get("id") or ""
+        sent = float(msg.get("time") or now)
+        for table in (self.seen_ids, self.recent):
+            for key in [k for k, t in table.items() if t < now - DEDUP_SECONDS]:
+                del table[key]
+        if mid and mid in self.seen_ids:
+            return "replay"
+        self.seen_ids[mid] = now
+        if sent < now - MAX_BACKLOG:
+            return "stale"
+        key = f"{msg.get('title') or ''}\0{msg.get('message') or ''}"
+        if key in self.recent:
+            return "duplicate"
+        tagged = conf.get("desktop_tag") and conf["desktop_tag"] in (msg.get("tags") or [])
+        if priority(msg) < min_priority(conf) and not tagged:
+            return f"priority {priority(msg)}"
+        self.recent[key] = now
+        return "show"
+
+
+def notify_args(msg: dict, wait: bool) -> list[str]:
+    """The notify-send command for one message. The body is escaped: Omarchy's
     notification server renders markup, and push text is not markup."""
     title = msg.get("title") or f"ntfy · {msg.get('topic') or TOPIC}"
-    body = html.escape(msg.get("message") or "", quote=False)
-    args = ["notify-send", "--app-name=ntfy", f"--urgency={urgency(msg.get('priority'))}"]
-    if click_url(msg):
+    body = (msg.get("message") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    args = ["notify-send", "--app-name=ntfy", f"--urgency={urgency(priority(msg))}"]
+    if wait:
         args += ["--action=default=Open", "--wait"]
     return args + ["--", title, body]
 
 
+# --- acting --------------------------------------------------------------------------------------
+
+_waiting = threading.BoundedSemaphore(MAX_WAITING)
+
+
 def show(msg: dict) -> None:
     url = click_url(msg)
-    args = notify_args(msg)
-    if not url:
-        subprocess.run(args, check=False)
+    if not url or not _waiting.acquire(blocking=False):
+        subprocess.run(notify_args(msg, wait=False), check=False)
         return
 
     def wait_for_click() -> None:
-        # --wait blocks until the card closes and prints the action key if one was used.
-        done = subprocess.run(args, check=False, capture_output=True, text=True)
-        if done.stdout.strip() == "default":
-            subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
+        try:
+            # --wait blocks until the card closes and prints the action key if one was used.
+            done = subprocess.run(notify_args(msg, wait=True), check=False, capture_output=True, text=True)
+            if done.stdout.strip() == "default":
+                subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        finally:
+            _waiting.release()
 
     threading.Thread(target=wait_for_click, daemon=True).start()
 
 
+def log_suppressed(msg: dict, reason: str, now: float) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if LOG.stat().st_size > LOG_MAX_BYTES:
+            os.replace(LOG, LOG.with_suffix(".log.1"))
+    except OSError:
+        pass
+    text = " ".join(str(msg.get("message") or "").split())[:160]
+    line = (f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}  {reason:<10}  "
+            f"p{priority(msg)}  {msg.get('title') or '-'}: {text}\n")
+    with LOG.open("a") as handle:
+        handle.write(line)
+
+
+# --- the stream ----------------------------------------------------------------------------------
+
 def since_param(last: dict, now: float) -> str:
-    """Resume after the last message seen (ntfy's since=<id> is exclusive), but never
-    further back than MAX_BACKLOG. First start: only new pushes."""
-    if not last.get("time"):
+    """Resume after the last message handled (ntfy's since=<id> is exclusive), so nothing is
+    replayed. When that message is older than MAX_BACKLOG, everything newer is unhandled
+    anyway: ask for the last MAX_BACKLOG only. First start: new pushes only."""
+    if not last.get("id"):
         return str(int(now))
-    if last.get("id") and last["time"] >= now - MAX_BACKLOG:
+    if float(last.get("time") or 0) >= now - MAX_BACKLOG:
         return str(last["id"])
     return str(int(now - MAX_BACKLOG))
 
 
 def load_last() -> dict:
     try:
-        data = json.loads(STATE.read_text())
+        data = json.loads(LAST.read_text())
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
 def save_last(last: dict) -> None:
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE.with_suffix(".tmp")
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = LAST.with_suffix(".tmp")
     tmp.write_text(json.dumps(last) + "\n")
-    os.replace(tmp, STATE)
+    os.replace(tmp, LAST)
 
 
-def stream(seen: dict[str, float]) -> None:
-    last = load_last()
-    query = urllib.parse.urlencode({"since": since_param(last, time.time())})
+def stream(gate: Gate) -> None:
+    query = urllib.parse.urlencode({"since": since_param(load_last(), time.time())})
     req = urllib.request.Request(f"{URL}/{urllib.parse.quote(TOPIC)}/json?{query}",
                                  headers={"User-Agent": "ginger-ntfy-desktop"})
     with urllib.request.urlopen(req, timeout=READ_TIMEOUT) as resp:
         print(f"connected to {URL}/{TOPIC}", flush=True)
         for raw in resp:
-            line = raw.strip()
-            if not line:
+            if not raw.strip():
                 continue
-            msg = json.loads(line)
+            msg = json.loads(raw)
             if msg.get("event") != "message":
                 continue
-            mid, ts = msg.get("id", ""), float(msg.get("time") or time.time())
-            if mid in seen:
-                continue
-            seen[mid] = ts
-            for old in [k for k, v in seen.items() if v < ts - MAX_BACKLOG]:
-                del seen[old]
-            show(msg)
-            if ts >= float(last.get("time") or 0):
-                last = {"id": mid, "time": ts}
-                save_last(last)
+            now = time.time()
+            reason = gate.verdict(msg, settings(), now)
+            if reason == "show":
+                show(msg)
+            elif reason != "replay":
+                log_suppressed(msg, reason, now)
+            save_last({"id": msg.get("id", ""), "time": float(msg.get("time") or now)})
 
 
-def main() -> int:
-    if not shutil.which("notify-send"):
-        print("notify-send not found (libnotify)", file=sys.stderr)
-        return 1
-    seen: dict[str, float] = {}
-    delay = 2
+def print_log(n: int) -> int:
+    try:
+        lines = LOG.read_text().splitlines()
+    except OSError:
+        lines = []
+    print("\n".join(lines[-n:]) if lines else "nothing suppressed yet")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) > 1 and argv[1] == "log":
+        return print_log(int(argv[2]) if len(argv) > 2 and argv[2].isdigit() else 20)
+    gate = Gate()
+    delay = 5
     while True:
         started = time.monotonic()
         try:
-            stream(seen)
-        except (OSError, socket.timeout, ValueError) as e:
+            stream(gate)
+        except (OSError, ValueError) as e:
             print(f"stream ended: {e}", file=sys.stderr, flush=True)
-        # A connection that lasted a while was healthy: retry fast. Back off otherwise.
-        delay = 2 if time.monotonic() - started > 60 else min(delay * 2, 60)
+        # A connection that stayed up a while was healthy: retry soon. Otherwise back off.
+        delay = 5 if time.monotonic() - started > 120 else min(delay * 2, 300)
         time.sleep(delay)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv))

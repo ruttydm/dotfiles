@@ -6,12 +6,14 @@ user extension file, ~/.config/omarchy/extensions/omarchy-menu.jsonc, between
 two marker comments. Everything outside the markers is left alone. The shell
 watches that file and picks the change up by itself.
 
-  ginger-menu refresh [--notify]   ask rz for every box's projects, cache them, rewrite the rows
+  ginger-menu refresh [--manual]   ask rz for every box's projects, cache them, rewrite the rows
   ginger-menu render               rewrite the rows from the cache only (no network)
 
-`dev ls --all --json` runs on rz over SSH (about 15 s; tp's link is slow). tp's
-own projects come from the local `dev ls --json`, because rz cannot always reach
-tp. The ginger-menu-refresh timer runs `refresh` every 30 minutes.
+Nothing runs in the background. The "ginger" row carries a `when:` guard,
+which Omarchy evaluates each time a menu opens. It is bash builtins only (no
+process) while the cache is younger than STALE_SECONDS; after that it starts
+one detached `refresh`, and the rows update in place when it finishes.
+`dev ls --all --json` runs on rz over SSH (about 15 s, mostly on rz).
 """
 
 from __future__ import annotations
@@ -30,6 +32,9 @@ CACHE = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "ginger-menu" 
 MENU = HOME / ".config/omarchy/extensions/omarchy-menu.jsonc"
 REMOTE = os.environ.get("GINGER_MENU_REMOTE", "rz")
 LOCAL_BOX = os.environ.get("GINGER_MENU_LOCAL_BOX", "tp")
+STALE_SECONDS = 600
+CHECKED = CACHE.with_name("checked")     # epoch of the last refresh attempt, read by the menu guard
+LOCK = CACHE.with_name("refresh.lock")
 BOXES = ("rz", "pi", "tp")
 BEGIN = "  // ginger-menu:begin (written by ginger-menu; edits between these lines are replaced)"
 END = "  // ginger-menu:end"
@@ -50,22 +55,20 @@ def dev_ls(cmd: list[str], timeout: int) -> list[dict]:
     return data
 
 
-def fetch() -> list[dict]:
-    """Every box's projects from rz, with this box's own list taken locally."""
+def fetch(previous: list[dict]) -> list[dict]:
+    """Every box's projects, from rz. When rz cannot reach a box (tp on a bad link), that box
+    keeps its rows from the previous cache rather than vanishing."""
     remote = dev_ls(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", REMOTE,
                      "~/.local/bin/dev ls --all --json"], timeout=120)
-    try:
-        local = dev_ls([str(HOME / ".local/bin/dev"), "ls", "--json"], timeout=60)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        local = []
-    if local:
-        remote = [p for p in remote if p.get("box") != LOCAL_BOX] + local
-    return remote
+    boxes = {p.get("box") for p in remote}
+    return remote + [p for p in previous if p.get("box") not in boxes]
 
 
 def projects(raw: list[dict]) -> list[dict]:
     """Served projects only (a URL, not a worktree), sorted by box then name."""
-    rows = [p for p in raw if p.get("url") and not p.get("worktree_of") and p.get("box")]
+    keep = ("name", "box", "url", "stack", "framework")
+    rows = [{k: p.get(k) for k in keep} for p in raw
+            if p.get("url") and not p.get("worktree_of") and p.get("box") and p.get("name")]
     order = {b: i for i, b in enumerate(BOXES)}
     return sorted(rows, key=lambda p: (order.get(p["box"], len(BOXES)), p["box"], p["name"].lower()))
 
@@ -78,9 +81,17 @@ def row(item_id: str, **fields: str) -> str:
     return f"  {json.dumps(item_id)}: {json.dumps(fields, ensure_ascii=False)},"
 
 
+def guard() -> str:
+    """The `when:` on the ginger row: always true; refreshes in the background when stale."""
+    return (f'read -r t < "$HOME/{CHECKED.relative_to(HOME)}"; printf -v n "%(%s)T" -1; '
+            f'(( n - ${{t:-0}} < {STALE_SECONDS} )) || '
+            'setsid -f "$HOME/.local/bin/ginger-menu" refresh </dev/null >/dev/null 2>&1; true')
+
+
 def block(items: list[dict], updated: float | None) -> str:
     lines = [BEGIN,
-             row("ginger", icon=ICON_MENU, label="Ginger", description="Dev boxes, T3 and projects"),
+             row("ginger", icon=ICON_MENU, label="Ginger", description="Dev boxes, T3 and projects",
+                 when=guard()),
              row("ginger.term-rz", icon=ICON_TERM, label="Terminal on rz", description="herdr session · Super+Alt+R",
                  action="omarchy-launch-terminal rz"),
              row("ginger.term-pi", icon=ICON_TERM, label="Terminal on pi", description="herdr session · Super+Alt+P",
@@ -108,7 +119,7 @@ def block(items: list[dict], updated: float | None) -> str:
                              action=f"xdg-open {shlex.quote(p['url'])}"))
     when = time.strftime("%d %b %H:%M", time.localtime(updated)) if updated else "never"
     lines.append(row("ginger.refresh", icon=ICON_REFRESH, label="Refresh project list",
-                     description=f"from {REMOTE} · updated {when}", action="ginger-menu refresh --notify"))
+                     description=f"from {REMOTE} · updated {when}", action="ginger-menu refresh --manual"))
     lines.append(END)
     return "\n".join(lines)
 
@@ -160,32 +171,39 @@ def notify(summary: str, body: str = "") -> None:
     subprocess.run(["notify-send", "--app-name=Ginger", summary, body], check=False)
 
 
+def refresh(manual: bool) -> int:
+    import fcntl
+    CACHE.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return 0  # a refresh is already running
+        CHECKED.write_text(f"{int(time.time())}\n")
+        previous, updated = load_cache()
+        try:
+            items = projects(fetch(previous))
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            print(f"refresh failed: {e}", file=sys.stderr)
+            render(previous, updated)
+            if manual:  # only a refresh you asked for reports a failure
+                notify("Ginger: refresh failed", f"Kept the cached list. {e}"[:300])
+            return 1
+        now = time.time()
+        CACHE.write_text(json.dumps({"updated": now, "projects": items}))
+        render(items, now)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "render"
-    loud = "--notify" in argv
     if cmd == "render":
         render(*load_cache())
         return 0
-    if cmd != "refresh":
-        print(__doc__, file=sys.stderr)
-        return 2
-    if loud:
-        notify("Ginger", f"Refreshing projects from {REMOTE}…")
-    try:
-        items = projects(fetch())
-    except (OSError, subprocess.SubprocessError, ValueError) as e:
-        print(f"refresh failed: {e}", file=sys.stderr)
-        render(*load_cache())
-        if loud:
-            notify("Ginger: refresh failed", f"Kept the cached list. {e}"[:300])
-        return 1
-    now = time.time()
-    CACHE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE.write_text(json.dumps({"updated": now, "projects": items}))
-    render(items, now)
-    if loud:
-        notify("Ginger", f"{len(items)} projects in the menu")
-    return 0
+    if cmd == "refresh":
+        return refresh("--manual" in argv)
+    print(__doc__, file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

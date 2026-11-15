@@ -29,33 +29,51 @@ def omarchy_jsonc(text):
     return json.loads(stripped)
 
 
+NOW = 1_800_000_000
+
+
+def push(**kw):
+    msg = {"event": "message", "id": kw.pop("id", "m1"), "time": NOW, "title": "CI", "message": "red", "priority": 3}
+    msg.update(kw)
+    return msg
+
+
 class NtfyTest(unittest.TestCase):
-    def test_priority_to_urgency(self):
-        self.assertEqual([ntfy.urgency(p) for p in (1, 2, 3, 4, 5, None, "x")],
-                         ["low", "low", "normal", "normal", "critical", "normal", "normal"])
+    CONF = ntfy.parse_conf("")
+
+    def test_only_high_priority_shows_by_default(self):
+        gate = ntfy.Gate()
+        self.assertEqual(gate.verdict(push(id="a", priority=3), self.CONF, NOW), "priority 3")
+        self.assertEqual(gate.verdict(push(id="b", priority=4), self.CONF, NOW), "show")
+        self.assertEqual(gate.verdict(push(id="c", priority=1, title="x", tags=["desktop"]), self.CONF, NOW), "show")
+
+    def test_threshold_is_one_setting(self):
+        conf = ntfy.parse_conf("# show default pushes too\nmin_priority = 3\n")
+        self.assertEqual(ntfy.Gate().verdict(push(priority=3), conf, NOW), "show")
+        self.assertEqual(ntfy.min_priority(ntfy.parse_conf("min_priority=9")), 5)
+
+    def test_duplicates_replays_and_stale_pushes_are_suppressed(self):
+        gate = ntfy.Gate()
+        self.assertEqual(gate.verdict(push(id="a", priority=5), self.CONF, NOW), "show")
+        self.assertEqual(gate.verdict(push(id="a", priority=5), self.CONF, NOW + 1), "replay")
+        self.assertEqual(gate.verdict(push(id="b", priority=5), self.CONF, NOW + 300), "duplicate")
+        self.assertEqual(gate.verdict(push(id="c", priority=5), self.CONF, NOW + 700), "show")
+        self.assertEqual(gate.verdict(push(id="d", priority=5, title="old", time=NOW - 7200), self.CONF, NOW + 700),
+                         "stale")
 
     def test_click_url_waits_for_the_default_action(self):
-        args = ntfy.notify_args({"title": "CI", "message": "a < b & c", "priority": 5,
-                                 "click": "https://nomad.rz.afai.cc"})
-        self.assertEqual(args, ["notify-send", "--app-name=ntfy", "--urgency=critical",
-                                "--action=default=Open", "--wait", "--", "CI", "a &lt; b &amp; c"])
-
-    def test_view_action_is_a_click_url_and_other_schemes_are_not(self):
+        msg = push(priority=5, message="a < b & c", click="https://nomad.rz.afai.cc")
+        self.assertEqual(ntfy.notify_args(msg, wait=True),
+                         ["notify-send", "--app-name=ntfy", "--urgency=critical",
+                          "--action=default=Open", "--wait", "--", "CI", "a &lt; b &amp; c"])
         self.assertEqual(ntfy.click_url({"actions": [{"action": "view", "url": "https://x.test/"}]}),
                          "https://x.test/")
         self.assertEqual(ntfy.click_url({"click": "file:///etc/passwd"}), "")
 
-    def test_no_url_no_wait(self):
-        args = ntfy.notify_args({"message": "hi", "topic": "rutger"})
-        self.assertNotIn("--wait", args)
-        self.assertEqual(args[-2:], ["ntfy · rutger", "hi"])
-
-    def test_since_resumes_by_id_within_the_backlog(self):
-        now = 1_800_000_000
-        self.assertEqual(ntfy.since_param({}, now), str(now))
-        self.assertEqual(ntfy.since_param({"id": "abc", "time": now - 60}, now), "abc")
-        self.assertEqual(ntfy.since_param({"id": "abc", "time": now - 86400}, now),
-                         str(now - ntfy.MAX_BACKLOG))
+    def test_since_resumes_after_the_last_message(self):
+        self.assertEqual(ntfy.since_param({}, NOW), str(NOW))
+        self.assertEqual(ntfy.since_param({"id": "abc", "time": NOW - 60}, NOW), "abc")
+        self.assertEqual(ntfy.since_param({"id": "abc", "time": NOW - 86400}, NOW), str(NOW - ntfy.MAX_BACKLOG))
 
 
 PROJECTS = [
@@ -86,6 +104,23 @@ class MenuTest(unittest.TestCase):
         fewer = menu.splice(once, menu.block([], None))
         self.assertNotIn("ginger.rz.nomad", omarchy_jsonc(fewer))
         self.assertIn("personal", omarchy_jsonc(fewer))
+
+    def test_unreachable_box_keeps_its_cached_rows(self):
+        previous = [{"name": "old", "box": "tp", "url": "https://old.tp.afai.cc"},
+                    {"name": "gone", "box": "rz", "url": "https://gone.rz.afai.cc"}]
+        real, menu.dev_ls = menu.dev_ls, lambda cmd, timeout: [p for p in PROJECTS if p["box"] != "tp"]
+        try:
+            names = sorted(p["name"] for p in menu.fetch(previous))
+        finally:
+            menu.dev_ls = real
+        self.assertIn("old", names)
+        self.assertNotIn("gone", names)
+
+    def test_guard_is_always_true_and_names_the_refresh(self):
+        g = menu.guard()
+        self.assertTrue(g.rstrip().endswith("; true"))
+        self.assertIn("setsid -f", g)
+        self.assertIn(str(menu.STALE_SECONDS), g)
 
     def test_comment_only_and_missing_files(self):
         omarchy_jsonc(menu.splice("{\n  // only comments\n}\n", menu.block([], None)))
