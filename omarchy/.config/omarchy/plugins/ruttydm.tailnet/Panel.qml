@@ -6,11 +6,11 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// CPU and memory for this machine on the bar, then one pill per fleet box
-// (servers and ginger-dev boxes): its name, its T3 agents working and waiting,
-// and failing PRs. A box that is offline, or past a disk, swap or memory limit,
-// turns urgent and says why in place of its name. The dropdown has the same for
-// every device on the tailnet.
+// CPU and memory for this machine on the bar, then the name of each fleet box
+// (servers and ginger-dev boxes) coloured by its state: urgent when it is
+// offline or past a disk, swap or memory limit, bold while T3 agents work there,
+// dim when quiet, and an accent pause mark when an agent waits for you. The
+// tooltip and the dropdown say why, with counts, for every device on the tailnet.
 //
 // This machine's CPU and memory come from /proc every two seconds; nothing is
 // spawned for them. omarchy-tailnet-stats runs every pollSeconds (60) for the
