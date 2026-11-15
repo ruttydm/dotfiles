@@ -45,16 +45,18 @@ function cpuPercent(prev, cur) {
 }
 
 function memory(meminfoText) {
-  var total = 0, available = -1
+  var v = {}
   var lines = String(meminfoText || "").split("\n")
   for (var i = 0; i < lines.length; i++) {
-    var m = /^(MemTotal|MemAvailable):\s+(\d+)\s*kB/.exec(lines[i])
-    if (!m) continue
-    if (m[1] === "MemTotal") total = Number(m[2]) * 1024
-    else available = Number(m[2]) * 1024
+    var m = /^(MemTotal|MemAvailable|SwapTotal|SwapFree):\s+(\d+)\s*kB/.exec(lines[i])
+    if (m) v[m[1]] = Number(m[2]) * 1024
   }
-  if (total <= 0 || available < 0) return null
-  return { total: total, used: Math.max(0, total - available) }
+  if (!(v.MemTotal > 0) || !(v.MemAvailable >= 0)) return null
+  var swapTotal = v.SwapTotal > 0 ? v.SwapTotal : 0
+  return {
+    total: v.MemTotal, used: Math.max(0, v.MemTotal - v.MemAvailable),
+    swapTotal: swapTotal, swapUsed: swapTotal > 0 ? Math.max(0, swapTotal - Math.min(v.SwapFree || 0, swapTotal)) : 0
+  }
 }
 
 function pad3(n) {
@@ -285,7 +287,14 @@ function isFleet(d) {
 
 // Why a device needs attention, as short phrases ("swap 98%", "off"); empty when it is fine.
 // Offline only counts for fleet boxes; this machine is never offline to itself.
+// Why a device needs attention as the bar shows it: the debounced reasons a poll left in
+// `alert` (see observe), or, for a device that has not been polled, worked out from its numbers.
 function problems(d) {
+  if (d && Array.isArray(d.alert)) return d.alert.slice()
+  return rawProblems(d)
+}
+
+function rawProblems(d) {
   if (!d) return []
   if (!d.online) return isFleet(d) ? ["off"] : []
   var s = d.stats
@@ -452,6 +461,149 @@ function fleetTooltip(cpu, mem, devices, now) {
   return lines.join("\n")
 }
 
+// ---------------------------------------------------------------- polling (no process per poll)
+
+// The bar polls each box's stats.json in-process every `every` seconds. What it shows for a box
+// changes only after `confirm` polls in a row agree, so one lost request or a value hovering at a
+// limit never flashes the bar. After `confirm` failures in a row the box is offline and is
+// retried every `backoff` seconds until it answers again.
+var POLL = { every: 60, backoff: 300, confirm: 2, timeout: 8, maxBytes: 65536 }
+
+function newPoll() {
+  return { fails: 0, stats: null, at: 0, nextAt: 0, shown: false, reasons: [], streak: 0, pending: null }
+}
+
+function statsUrl(d) {
+  return d && d.url && /^https:\/\/[a-z0-9.-]+$/.test(d.url) ? d.url + "/stats.json" : ""
+}
+
+// The boxes the bar polls: fleet boxes with a stats URL. This machine is read locally instead.
+function pollTargets(devices) {
+  var out = []
+  for (var i = 0; i < devices.length; i++) if (isFleet(devices[i]) && statsUrl(devices[i])) out.push(devices[i])
+  return out
+}
+
+// A few seconds of slack, so a timer that fires a little early still polls on that tick.
+function due(state, now) {
+  return !state || !(state.nextAt > now + 5)
+}
+
+// Fold one poll into a box's state. `ok` false is a failed fetch; `stats` is cleaned (cleanStats).
+// `now` is when the request started, so the next one is due a full interval after it.
+function observe(prev, ok, stats, now, device) {
+  var s = {}
+  var base = prev || newPoll()
+  for (var k in base) s[k] = base[k]
+  var raw, reasons
+  if (ok && stats) {
+    s.fails = 0
+    s.stats = stats
+    s.at = now
+    reasons = rawProblems({ online: true, self: !!(device && device.self), group: device ? device.group : "dev", stats: stats })
+    raw = reasons.length > 0
+  } else {
+    s.fails = base.fails + 1
+    raw = true
+    reasons = s.fails >= POLL.confirm ? ["off"] : null  // one miss is not a reason yet
+  }
+  s.nextAt = now + (s.fails >= POLL.confirm ? POLL.backoff : POLL.every)
+  // `pending` keeps the reasons seen while the streak builds, for a streak that ends on a single miss.
+  if (raw === base.shown) {
+    s.streak = 0
+    s.pending = null
+    if (raw && reasons) s.reasons = reasons
+  } else if (base.streak + 1 >= POLL.confirm) {
+    s.shown = raw
+    s.reasons = raw ? (reasons || base.pending || ["off"]) : []
+    s.streak = 0
+    s.pending = null
+  } else {
+    s.streak = base.streak + 1
+    s.pending = reasons || base.pending || null
+  }
+  return s
+}
+
+// stats.json as a box serves it (ginger-dev stats.py), checked and bounded like the collector does,
+// in the collector's shape so cleanStats takes it. null when it is not a usable stats document.
+function fromStatsJson(raw) {
+  if (!raw || typeof raw !== "object" || raw.v !== 1) return null
+  function obj(v) { return v && typeof v === "object" && !Array.isArray(v) ? v : {} }
+  function n(v) { return typeof v === "number" ? v : null }
+  var cpu = obj(raw.cpu), mem = obj(raw.mem), swap = obj(raw.swap), disk = obj(raw.disk)
+  return cleanStats({
+    cpu: n(cpu.pct), cores: n(cpu.cores), load: Array.isArray(raw.load) ? raw.load.slice(0, 3).filter(function(v) { return typeof v === "number" }) : [],
+    memTotal: n(mem.total), memAvailable: n(mem.available), swapTotal: n(swap.total), swapFree: n(swap.free),
+    diskTotal: n(disk.total), diskUsed: disk.total > 0 && disk.used >= 0 ? Math.min(disk.used, disk.total) : null,
+    tempC: n(raw.temp_c), uptime: n(raw.uptime_s),
+    agents: raw.agents && typeof raw.agents === "object" ? raw.agents : null,
+    ciFailing: raw.ci && typeof raw.ci === "object" ? raw.ci.failing : 0
+  })
+}
+
+// This machine's T3 counts from ginger-dev's agents.json, while fresh (dev refresh, every 2 min).
+function localAgents(text, now) {
+  var raw
+  try { raw = JSON.parse(String(text || "").slice(0, 4096)) } catch (e) { return null }
+  if (!raw || typeof raw !== "object" || raw.v !== 1 || typeof raw.ts !== "number") return null
+  if (raw.ts < now - 600 || raw.ts > now + 60) return null
+  return { agents: cleanAgents(raw), ciFailing: count(raw.ci && typeof raw.ci === "object" ? raw.ci.failing : 0) }
+}
+
+// This machine's stats for the bar: live /proc numbers and agents over the collector's last
+// reading (disk, temperature and uptime change slowly, so the collector's 30-minute sweep is enough).
+function selfStats(prev, cpu, mem, local) {
+  if (!mem) return prev || null
+  return {
+    cpu: cpu >= 0 ? cpu : (prev ? prev.cpu : 0), cores: prev ? prev.cores : null, load: prev ? prev.load : [],
+    memTotal: mem.total, memUsed: mem.used, swapTotal: mem.swapTotal || 0, swapUsed: mem.swapUsed || 0,
+    diskTotal: prev ? prev.diskTotal : null, diskUsed: prev ? prev.diskUsed : null,
+    tempC: prev ? prev.tempC : null, uptime: prev ? prev.uptime : null,
+    agents: local ? local.agents : (prev ? prev.agents : null), ciFailing: local ? local.ciFailing : (prev ? prev.ciFailing || 0 : 0)
+  }
+}
+
+// The collector's devices with the latest polls laid over them: reachability, the newer of the
+// two stats readings, and the debounced `alert`. `polls` is { device id: state }; `updated` is
+// when the collector ran. A fleet box the bar has not polled yet shows no alert: one reading
+// from the collector is not two polls in a row.
+function withPolls(devices, polls, updated) {
+  var out = []
+  for (var i = 0; i < devices.length; i++) {
+    var d = devices[i]
+    var p = polls ? polls[d.id] : null
+    var c = {}
+    for (var k in d) c[k] = d[k]
+    if (p) {
+      if (!d.self) {
+        c.online = p.fails < POLL.confirm
+        var collectorNewer = d.stats && d.online && updated > p.at
+        c.stats = c.online ? (collectorNewer ? d.stats : (p.stats || d.stats)) : null
+        c.error = p.fails > 0 && !collectorNewer ? "unreachable" : d.error
+      } else if (p.stats) {
+        c.stats = p.stats
+      }
+      c.alert = p.shown ? p.reasons.slice() : []
+    } else if (isFleet(d) && statsUrl(d)) {
+      c.alert = []
+    }
+    out.push(c)
+  }
+  return out
+}
+
+// Whether the session is locked, from Hyprland's monitor objects (`hyprctl -j monitors`): a lock
+// is one of the reasons a monitor cannot go solitary. The same test as omarchy-hyprland-session-locked.
+function sessionLocked(monitorObjects) {
+  var list = Array.isArray(monitorObjects) ? monitorObjects : []
+  for (var i = 0; i < list.length; i++) {
+    var blocked = list[i] && Array.isArray(list[i].solitaryBlockedBy) ? list[i].solitaryBlockedBy : []
+    if (blocked.indexOf("LOCK") >= 0) return true
+  }
+  return false
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     cpuTimes: cpuTimes, cpuPercent: cpuPercent, memory: memory, barText: barText, barTooltip: barTooltip,
@@ -461,6 +613,9 @@ if (typeof module !== "undefined") {
     LIMITS: LIMITS, WORK_ICON: WORK_ICON, WAIT_ICON: WAIT_ICON, DONE_ICON: DONE_ICON,
     isFleet: isFleet, problems: problems, pills: pills, barSegments: barSegments, segmentsText: segmentsText,
     urgentCount: urgentCount, problemSummary: problemSummary, agentsLine: agentsLine, agentsHtml: agentsHtml,
-    detailHtml: detailHtml, swapLabel: swapLabel, fleetTooltip: fleetTooltip, escapeHtml: escapeHtml
+    detailHtml: detailHtml, swapLabel: swapLabel, fleetTooltip: fleetTooltip, escapeHtml: escapeHtml,
+    POLL: POLL, newPoll: newPoll, statsUrl: statsUrl, pollTargets: pollTargets, due: due, observe: observe,
+    fromStatsJson: fromStatsJson, localAgents: localAgents, selfStats: selfStats, withPolls: withPolls,
+    rawProblems: rawProblems, sessionLocked: sessionLocked
   }
 }

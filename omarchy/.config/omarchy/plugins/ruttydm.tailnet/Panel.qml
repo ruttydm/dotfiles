@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -12,17 +13,28 @@ import "Model.js" as Model
 // dim when quiet, and an accent pause mark when an agent waits for you. The
 // tooltip and the dropdown say why, with counts, for every device on the tailnet.
 //
-// This machine's CPU and memory come from /proc every two seconds; nothing is
-// spawned for them. omarchy-tailnet-stats runs every pollSeconds (60) for the
-// pills, and every refreshSeconds while the dropdown is open. That collector
-// does the network work: the device list from Tailscale, and each ginger-dev
-// box's https://<box>/stats.json (about 400 bytes each).
+// Kept light on purpose, and it never sends a notification: trouble is only a
+// colour on the bar. What runs while the dropdown is closed:
+// - /proc/stat and /proc/meminfo, read in-process every two seconds;
+// - every pollSeconds (60), one in-process GET of each fleet box's
+//   https://<box>/stats.json (~400 bytes; the box does the T3 work in its own
+//   `dev refresh`), plus ginger-dev's agents.json for this machine. No process
+//   is started for a poll. A box that fails twice in a row is offline and is
+//   retried every 5 minutes; what the bar shows only changes after two polls
+//   in a row agree, so nothing flashes;
+// - omarchy-tailnet-stats (Tailscale's device list, disk, temperature), once
+//   at start and then every 30 minutes.
+// While the dropdown is open the collector also runs every refreshSeconds.
+// While the session is locked nothing above runs: each tick only asks
+// Hyprland (over its socket, no process) whether the lock is still there.
 Panel {
   id: root
   moduleName: "ruttydm.tailnet"
   ipcTarget: "ruttydm.tailnet"
 
   readonly property int refreshSeconds: Math.max(10, Math.min(300, Number(setting("refreshSeconds", 15)) || 15))
+  // Nothing polls while the session is locked (checkLock).
+  property bool paused: false
   readonly property int pollSeconds: Math.max(30, Math.min(600, Number(setting("pollSeconds", 60)) || 60))
   readonly property string btopCommand: String(setting("btopCommand", "omarchy-launch-or-focus-tui btop"))
   readonly property string collectorPath: (Quickshell.env("HOME") || "") + "/.local/bin/omarchy-tailnet-stats"
@@ -32,17 +44,24 @@ Panel {
   property int localCpu: -1
   property var localMem: null
 
-  // ---- The tailnet, for the dropdown.
+  // ---- The tailnet. `devices` is the collector's list; `polls` the in-process
+  // stats.json polls by device id; `live` is both together, which is what shows.
   property var devices: []
+  property var polls: ({})
+  property var inflight: ({})
+  property int inflightCount: 0
+  readonly property var live: Model.withPolls(devices, polls, updated)
+  readonly property string agentsPath: (Quickshell.env("HOME") || "") + "/.local/state/ginger-dev/agents.json"
+  readonly property int sweepMinutes: 30
   property real updated: 0
   property string error: ""
   property bool loading: false
   property real now: Date.now() / 1000
-  readonly property var groups: Model.grouped(devices)
+  readonly property var groups: Model.grouped(live)
   readonly property var flatDevices: Model.flat(groups)
-  readonly property int onlineCount: Model.onlineCount(devices)
-  readonly property string troubleText: Model.problemSummary(devices, now)
-  readonly property var segments: Model.barSegments(localCpu, localMem, devices)
+  readonly property int onlineCount: Model.onlineCount(live)
+  readonly property string troubleText: Model.problemSummary(live, now)
+  readonly property var segments: Model.barSegments(localCpu, localMem, live)
 
   property int cursorIndex: 0
   property bool cursorActive: false
@@ -115,6 +134,89 @@ Panel {
     root.clampCursor()
   }
 
+  function setPoll(id, state) {
+    var next = {}
+    for (var k in root.polls) next[k] = root.polls[k]
+    next[id] = state
+    root.polls = next
+  }
+
+  // Locked when any monitor lists LOCK in solitaryBlockedBy, as Omarchy's own
+  // omarchy-hyprland-session-locked checks. Reads the monitor objects from the
+  // last refresh and asks Hyprland for fresh ones for the next check.
+  function checkLock() {
+    var objs = []
+    var ms = Hyprland.monitors.values
+    for (var i = 0; i < ms.length; i++) objs.push(ms[i].lastIpcObject)
+    root.paused = Model.sessionLocked(objs)
+    Hyprland.refreshMonitors()
+  }
+
+  // One tick: this machine from /proc and agents.json, then every fleet box that is due.
+  function pollFleet() {
+    var now = Date.now() / 1000
+    root.now = now
+    for (var i = 0; i < root.devices.length; i++) {
+      var d = root.devices[i]
+      if (!d.self) continue
+      agentsFile.reload()
+      var stats = Model.selfStats(d.stats, root.localCpu, root.localMem, Model.localAgents(agentsFile.text(), now))
+      if (stats) root.setPoll(d.id, Model.observe(root.polls[d.id], true, stats, now, d))
+    }
+    var targets = Model.pollTargets(root.devices)
+    for (var j = 0; j < targets.length; j++) {
+      if (!root.inflight[targets[j].id] && Model.due(root.polls[targets[j].id], now)) root.fetchBox(targets[j])
+    }
+  }
+
+  // GET <box>/stats.json in-process. Bounded: headers over maxBytes abort, and
+  // the watchdog below aborts anything older than POLL.timeout seconds.
+  function fetchBox(d) {
+    var url = Model.statsUrl(d)
+    if (!url) return
+    var xhr = new XMLHttpRequest()
+    var entry = { xhr: xhr, started: Date.now() / 1000, device: d, aborted: false }
+    var inflight = root.inflight
+    inflight[d.id] = entry
+    root.inflightCount++
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState === XMLHttpRequest.HEADERS_RECEIVED) {
+        if (Number(xhr.getResponseHeader("Content-Length") || 0) > Model.POLL.maxBytes) {
+          entry.aborted = true
+          xhr.abort()
+        }
+      } else if (xhr.readyState === XMLHttpRequest.DONE) {
+        root.finishFetch(d.id, entry, !entry.aborted && xhr.status === 200 ? xhr.responseText : null)
+      }
+    }
+    xhr.open("GET", url)
+    xhr.setRequestHeader("Accept", "application/json")
+    xhr.send()
+  }
+
+  function finishFetch(id, entry, text) {
+    if (root.inflight[id] !== entry) return  // already finished (abort fires DONE too)
+    delete root.inflight[id]
+    root.inflightCount = Math.max(0, root.inflightCount - 1)
+    var stats = null
+    if (text && text.length <= Model.POLL.maxBytes) {
+      try { stats = Model.fromStatsJson(JSON.parse(text)) } catch (e) { stats = null }
+    }
+    root.now = Date.now() / 1000
+    root.setPoll(id, Model.observe(root.polls[id], stats !== null, stats, entry.started, entry.device))
+  }
+
+  function abortStale() {
+    var now = Date.now() / 1000
+    for (var id in root.inflight) {
+      var entry = root.inflight[id]
+      if (now - entry.started < Model.POLL.timeout) continue
+      entry.aborted = true
+      try { entry.xhr.abort() } catch (e) {}
+      root.finishFetch(id, entry, null)
+    }
+  }
+
   function clampCursor() {
     root.cursorIndex = Math.max(0, Math.min(root.cursorIndex, root.flatDevices.length - 1))
   }
@@ -149,19 +251,60 @@ Panel {
 
   FileView { id: statFile; path: "/proc/stat"; blockLoading: true; printErrors: false }
   FileView { id: memFile; path: "/proc/meminfo"; blockLoading: true; printErrors: false }
+  FileView { id: agentsFile; path: root.agentsPath; blockLoading: true; printErrors: false }
 
   Timer {
     interval: 2000
-    running: true
+    running: !root.paused
     repeat: true
     triggeredOnStart: true
     onTriggered: root.sampleLocal()
   }
 
-  // Always running: the pills need the fleet whether or not the dropdown is open.
+  // The fleet poll: in-process, no process started. Keeps ticking while locked,
+  // but then only checks whether the lock is still there.
   Timer {
-    interval: (root.opened ? root.refreshSeconds : root.pollSeconds) * 1000
+    interval: root.pollSeconds * 1000
     running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: {
+      root.checkLock()
+      if (!root.paused) root.pollFleet()
+    }
+  }
+
+  // While locked, Hyprland's events (unlocking sends several) prompt a quick
+  // recheck, so the bar wakes within a second of unlocking, not a minute.
+  Connections {
+    target: Hyprland
+    enabled: root.paused
+    function onRawEvent(event) { if (!lockRecheck.running) lockRecheck.restart() }
+  }
+
+  Timer {
+    id: lockRecheck
+    interval: 1000
+    onTriggered: {
+      root.checkLock()
+      if (!root.paused) {
+        root.sampleLocal()
+        root.pollFleet()
+      }
+    }
+  }
+
+  Timer {
+    interval: 2000
+    running: root.inflightCount > 0
+    repeat: true
+    onTriggered: root.abortStale()
+  }
+
+  // The collector: at start, every sweepMinutes, and every refreshSeconds while open.
+  Timer {
+    interval: (root.opened ? root.refreshSeconds : root.sweepMinutes * 60) * 1000
+    running: !root.paused || root.opened
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()
@@ -201,8 +344,8 @@ Panel {
     text: root.vertical ? Model.barText(root.localCpu, root.localMem) : Model.segmentsText(root.segments)
     labelVisible: root.vertical
     fixedWidth: root.vertical ? -1 : Math.ceil(segmentRow.implicitWidth + Style.spaceReal(7.5) * 2)
-    tooltipText: root.opened ? "" : (root.devices.length > 0
-      ? Model.fleetTooltip(root.localCpu, root.localMem, root.devices, root.now)
+    tooltipText: root.opened ? "" : (root.live.length > 0
+      ? Model.fleetTooltip(root.localCpu, root.localMem, root.live, root.now)
       : Model.barTooltip(root.localCpu, root.localMem))
     horizontalMargin: 7.5
     verticalPadding: 6
@@ -304,8 +447,8 @@ Panel {
               color: root.dim
               font.pixelSize: Style.font.bodySmall
               text: {
-                if (root.devices.length === 0) return root.loading ? "loading…" : ""
-                var parts = [root.onlineCount + " of " + root.devices.length + " online"]
+                if (root.live.length === 0) return root.loading ? "loading…" : ""
+                var parts = [root.onlineCount + " of " + root.live.length + " online"]
                 var fresh = root.loading ? "updating…" : Model.updatedLabel(root.updated, root.now)
                 if (fresh) parts.push(fresh)
                 return parts.join(" · ")
