@@ -18,7 +18,9 @@ if [[ "$box" == ginger-box ]]; then
 fi
 
 if (($#)); then
-  exec ssh -t "$box" "bash -lc $(printf '%q' "$*")"
+  tty=()
+  [[ -t 0 && -t 1 ]] && tty=(-t)
+  exec ssh "${tty[@]}" "$box" "bash -lc $(printf '%q' "$*")"
 fi
 
 attach='h="$HOME/.local/bin/herdr"; [ -x "$h" ] && exec "$h"; command -v tmux >/dev/null 2>&1 && exec tmux new -A -s main; exec "${SHELL:-bash}" -l'

@@ -159,11 +159,11 @@ install_ginger() {
     git config --global init.defaultBranch main
   fi
   if [[ -f "$HOME/.config/systemd/user/ginger-ntfy-desktop.service" ]]; then
-    echo "Enabling ntfy desktop notifications and the Ginger menu refresh"
+    echo "Enabling desktop notifications for high-priority ntfy pushes"
     systemctl --user daemon-reload
-    systemctl --user enable --now ginger-ntfy-desktop.service ginger-menu-refresh.timer
+    systemctl --user enable --now ginger-ntfy-desktop.service
+    # The menu refreshes itself when opened with a stale cache; this only places the rows.
     "$HOME/.local/bin/ginger-menu" render
-    systemctl --user start --no-block ginger-menu-refresh.service
   fi
 }
 
