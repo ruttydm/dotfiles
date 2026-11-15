@@ -24,7 +24,9 @@ test("cpu percent from two /proc/stat samples", () => {
 
 test("memory and bar label", () => {
   const mem = M.memory("MemTotal:  1048576 kB\nMemFree: 1 kB\nMemAvailable:  262144 kB\n")
-  assert.deepEqual(plain(mem), { total: 1073741824, used: 805306368 })
+  assert.deepEqual(plain(mem), { total: 1073741824, used: 805306368, swapTotal: 0, swapUsed: 0 })
+  const swapped = M.memory("MemTotal: 1048576 kB\nMemAvailable: 524288 kB\nSwapTotal: 2097152 kB\nSwapFree: 524288 kB\n")
+  assert.deepEqual(plain(swapped), { total: 1073741824, used: 536870912, swapTotal: 2147483648, swapUsed: 1610612736 })
   assert.equal(M.barText(7, mem), "   7%  \u{F061A}  75%")
   assert.equal(M.barText(-1, null), "   –%  \u{F061A}   –%")
 })
@@ -182,4 +184,107 @@ test("styled rows escape names and colour only what breaks a limit", () => {
   assert.equal(M.escapeHtml('<b a="1">&'), "&lt;b a=&quot;1&quot;&gt;&amp;")
   assert.equal(M.detailHtml(evil, 0, { urgent: '"><script>' }), '<font color="&quot;&gt;&lt;script&gt;">offline</font>')
   assert.equal(M.swapLabel(rz.stats), "15.8 / 16.0 GiB")
+})
+
+// ---------------------------------------------------------------- in-process polling
+
+const boxJson = (over = {}) => Object.assign({
+  v: 1, cpu: { pct: 12.5, cores: 4 }, load: [0.5, 0.4, 0.3], mem: { total: 8 * GiB, available: 6 * GiB },
+  swap: { total: 2 * GiB, free: 2 * GiB }, disk: { total: 100, used: 40 }, temp_c: 51, uptime_s: 3600,
+  agents: { working: 2, waiting: 1, done: 0 }, ci: { failing: 0 } }, over)
+
+test("stats.json from a box is checked and bounded in-process", () => {
+  const s = M.fromStatsJson(boxJson())
+  assert.equal(s.cpu, 13)
+  assert.equal(s.memUsed, 2 * GiB)
+  assert.equal(s.swapUsed, 0)
+  assert.deepEqual(plain(s.agents), { working: 2, waiting: 1, done: 0 })
+  assert.equal(M.fromStatsJson(boxJson({ v: 2 })), null)
+  assert.equal(M.fromStatsJson(boxJson({ cpu: { pct: 150 } })), null)
+  assert.equal(M.fromStatsJson(boxJson({ cpu: { pct: "5" } })), null)
+  assert.equal(M.fromStatsJson([1, 2]), null)
+  assert.equal(M.fromStatsJson(null), null)
+  assert.equal(M.fromStatsJson(boxJson({ disk: { total: 100, used: 900 } })).diskUsed, 100)
+  assert.equal(M.fromStatsJson(boxJson({ agents: undefined })).agents, null)
+  assert.equal(M.statsUrl({ url: "https://rz.example.cc" }), "https://rz.example.cc/stats.json")
+  assert.equal(M.statsUrl({ url: "javascript:x" }), "")
+})
+
+function run(seq, dev = { id: "pi", group: "dev" }) {
+  let s = null
+  const out = []
+  seq.forEach((step, i) => {
+    const stats = step === "fail" ? null : M.fromStatsJson(step === "swap" ? boxJson({ swap: { total: 10, free: 0 } }) : boxJson())
+    s = M.observe(s, step !== "fail", stats, (i + 1) * 60, dev)
+    out.push({ shown: s.shown, reasons: plain(s.reasons), wait: s.nextAt - (i + 1) * 60 })
+  })
+  return out
+}
+
+test("offline only after two failed polls in a row, then back off to 5 minutes", () => {
+  const r = run(["ok", "fail", "fail", "fail", "ok", "ok"])
+  assert.deepEqual(r.map(x => x.shown), [false, false, true, true, true, false])
+  assert.deepEqual(r[2].reasons, ["off"])
+  assert.deepEqual(r.map(x => x.wait), [60, 60, 300, 300, 60, 60])
+})
+
+test("flapping never flashes the bar", () => {
+  assert.ok(run(["ok", "fail", "ok", "fail", "ok", "fail", "ok"]).every(x => !x.shown))
+  assert.ok(run(["ok", "swap", "ok", "swap", "ok"]).every(x => !x.shown))
+  // and once urgent, one good poll does not clear it
+  const r = run(["swap", "swap", "ok", "swap", "ok", "ok"])
+  assert.deepEqual(r.map(x => x.shown), [false, true, true, true, true, false])
+  assert.deepEqual(r[1].reasons, ["swap 100%"])
+})
+
+test("a streak that ends on one miss keeps the reason it saw", () => {
+  const r = run(["ok", "swap", "fail"])
+  assert.equal(r[2].shown, true)
+  assert.deepEqual(r[2].reasons, ["swap 100%"])
+})
+
+test("due allows a few seconds of timer slack", () => {
+  assert.equal(M.due(null, 0), true)
+  assert.equal(M.due({ nextAt: 120 }, 117), true)
+  assert.equal(M.due({ nextAt: 120 }, 100), false)
+})
+
+test("polls laid over the collector's list", () => {
+  const ds = fleet()
+  const polls = {}
+  // rz answered twice with swap full: urgent; pi failed twice: offline, no stats
+  for (const t of [60, 120]) {
+    polls.rz = M.observe(polls.rz, true, M.fromStatsJson(boxJson({ swap: { total: 10, free: 0 } })), t, { group: "dev" })
+    polls.pi = M.observe(polls.pi, false, null, t, { group: "dev" })
+  }
+  const live = M.withPolls(ds, polls, 0)
+  const by = id => live.find(d => d.id === id)
+  assert.deepEqual(plain(M.problems(by("rz"))), ["swap 100%"])
+  assert.equal(by("pi").online, false)
+  assert.equal(by("pi").stats, null)
+  assert.deepEqual(plain(M.problems(by("pi"))), ["off"])
+  // not polled yet: no alert from one collector reading, even though rz's disk is at 93% there
+  const fresh = M.withPolls(ds, {}, 0)
+  assert.deepEqual(plain(M.problems(fresh.find(d => d.id === "rz"))), [])
+  assert.deepEqual(plain(M.barSegments(1, null, fresh).map(s => s.role)).includes("urgent"), false)
+  // a newer collector reading wins over an older poll for the numbers, not the alert
+  const newer = M.withPolls(ds, polls, 500).find(d => d.id === "rz")
+  assert.equal(newer.stats.diskUsed, 93)
+  assert.deepEqual(plain(M.problems(newer)), ["swap 100%"])
+})
+
+test("this machine: live memory and swap, agents from agents.json while fresh", () => {
+  assert.deepEqual(plain(M.localAgents('{"v":1,"ts":1000,"working":1,"waiting":2,"done":0,"ci":{"failing":3}}', 1100)),
+    { agents: { working: 1, waiting: 2, done: 0 }, ciFailing: 3 })
+  assert.equal(M.localAgents('{"v":1,"ts":1000,"working":1}', 1000 + 601), null)
+  assert.equal(M.localAgents("nope", 0), null)
+  const prev = byId("tp").stats
+  const s = M.selfStats(prev, 30, { total: 16 * GiB, used: 4 * GiB, swapTotal: 8, swapUsed: 8 },
+    { agents: { working: 0, waiting: 1, done: 0 }, ciFailing: 0 })
+  assert.equal(s.cpu, 30)
+  assert.equal(s.diskUsed, 50)
+  assert.equal(s.swapUsed, 8)
+  assert.equal(s.agents.waiting, 1)
+  assert.deepEqual(plain(M.rawProblems({ self: true, online: true, group: "dev", stats: s })), ["swap 100%"])
+  assert.equal(M.selfStats(prev, 30, null, null), prev)
 })
