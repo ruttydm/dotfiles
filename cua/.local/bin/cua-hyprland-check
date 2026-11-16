@@ -1,0 +1,36 @@
+#!/usr/bin/python3
+"""Load guard for Omarchy's cua-hyprland-plugin package, run by ~/.config/hypr/cua.lua before loading.
+
+Passes only when the plugin file exists and every dependency the package pins (the exact Hyprland
+build and its ABI libraries) is installed right now, so a half-finished system update never loads a
+plugin compiled against other headers. Prints nothing on success.
+"""
+import os, pathlib, subprocess, sys
+
+PLUGIN = pathlib.Path('/usr/lib/cua/hyprland/cua-hyprland-plugin.so')
+ENV = {'LC_ALL': 'C', 'PATH': '/usr/bin:/bin'}
+
+
+def fail(message):
+    print('cua-hyprland-check: ' + message, file=sys.stderr)
+    sys.exit(1)
+
+
+if not PLUGIN.is_file():
+    fail('the plugin is not installed; run: sudo pacman -S cua-hyprland-plugin')
+info = subprocess.run(['pacman', '-Qi', 'cua-hyprland-plugin'], capture_output=True, text=True, env=ENV)
+if info.returncode != 0:
+    fail('pacman does not know cua-hyprland-plugin; reinstall it from the omarchy repository')
+deps, in_depends = [], False
+for line in info.stdout.splitlines():
+    if line.startswith('Depends On'):
+        deps, in_depends = line.split(':', 1)[1].split(), True
+    elif in_depends and line.startswith(' '):
+        deps += line.split()
+    elif in_depends:
+        break
+deps = [d for d in deps if d != 'None']
+missing = subprocess.run(['pacman', '-T', *deps], capture_output=True, text=True, env=ENV) if deps else None
+if missing is not None and missing.returncode != 0:
+    fail('installed packages differ from what the plugin was built against: ' + ' '.join(missing.stdout.split())
+         + '; finish the system update (omarchy-update) so pacman brings a matching plugin')

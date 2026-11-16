@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Retired (2026-11-16): the Hyprland plugin now comes from Omarchy's package `cua-hyprland-plugin`,
+# built and pinned by Omarchy for the Hyprland in the same repository. Kept so older install.sh
+# copies that still call it keep working. See cua/README.md.
+echo "cua-build-hyprland: not needed; the plugin is Omarchy's package cua-hyprland-plugin (cua-setup installs it)."
+exit 0

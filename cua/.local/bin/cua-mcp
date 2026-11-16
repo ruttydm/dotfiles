@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# MCP entry point for Codex, Claude and Grok: one shared driver service, reached over its local socket.
+set -euo pipefail
+systemctl --user start cua-driver.service
+exec /usr/bin/cua-driver mcp --socket "$HOME/.cache/cua-driver/cua-driver.sock"
