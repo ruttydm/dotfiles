@@ -162,8 +162,6 @@ install_ginger() {
     echo "Enabling desktop notifications for high-priority ntfy pushes"
     systemctl --user daemon-reload
     systemctl --user enable --now ginger-ntfy-desktop.service
-    # The menu refreshes itself when opened with a stale cache; this only places the rows.
-    "$HOME/.local/bin/ginger-menu" render
   fi
 }
 
