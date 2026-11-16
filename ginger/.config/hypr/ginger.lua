@@ -3,4 +3,5 @@
 o.bind("SUPER + ALT + R", "Terminal on rz", "omarchy-launch-terminal rz")
 o.bind("SUPER + ALT + P", "Terminal on pi", "omarchy-launch-terminal rpi")
 o.bind("SUPER + ALT + T", "T3 on rz", "t3o rz")
-o.bind("SUPER + ALT + D", "Ginger menu", { menu = "ginger" })
+-- Recent projects and box CPU/RAM charts: the ruttydm.ginger overlay (omarchy package).
+o.bind("SUPER + ALT + D", "Ginger projects", "omarchy-shell shell toggle ruttydm.ginger '{}'")

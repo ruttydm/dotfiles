@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "ruttydm.ginger",
+  "name": "Ginger",
+  "version": "1.0.0",
+  "author": "ruttydm",
+  "description": "Recent projects on the Ginger dev boxes, opened in the default browser, with each box's CPU and memory charts. Super+Alt+D.",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": false,
+  "entryPoints": {
+    "overlay": "Ginger.qml"
+  }
+}
