@@ -1,0 +1,51 @@
+#!/usr/bin/python3
+"""Install Cua and merge agent integration; never copy account state into dotfiles."""
+import json, pathlib, re, shutil, subprocess
+H = pathlib.Path.home()
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+PACKAGES = ['cua-driver-bin', 'cua-hyprland-plugin']
+binary = pathlib.Path('/usr/bin/cua-driver')
+# Omarchy packages the driver (with its self-updater pointed back at pacman) and the Hyprland plugin
+# built for the Hyprland in the same repository. Install from the synced database only: no -Sy, so
+# this never makes a partial upgrade.
+if subprocess.run(['pacman', '-Q', *PACKAGES], capture_output=True).returncode != 0:
+    run('sudo', 'pacman', '-S', '--needed', *PACKAGES)
+# A driver from the vendor installer in ~/.local/bin would shadow the package and step around pacman.
+stray = H / '.local/bin/cua-driver'
+if stray.is_symlink() or stray.exists():
+    raise SystemExit(f'Remove the vendor-installed driver first: {stray} (and ~/.cua-driver/packages). See cua/README.md.')
+run(str(binary), 'skills', 'install')
+for directory in [H/'.grok/skills']:
+    directory.mkdir(parents=True, exist_ok=True)
+    link = directory/'cua-driver'
+    if not link.exists() and not link.is_symlink():
+        link.symlink_to(H/'.cua-driver/skills/cua-driver')
+command = str(H/'.local/bin/cua-mcp')
+# Change only the Cua tables; preserve unrelated MCPs and private settings.
+for name in ['.codex/config.toml', '.grok/config.toml']:
+    path = H/name
+    if not path.exists():
+        continue
+    original = path.read_text()
+    text = re.sub(r'(?ms)^\[mcp_servers\.cua-driver(?:\.env)?\]\n.*?(?=^\[|\Z)', '', original)
+    text = text.rstrip() + '\n\n[mcp_servers.cua-driver]\ncommand = '+json.dumps(command)+'\nargs = []\n'
+    import tomllib
+    tomllib.loads(text)
+    if text != original:
+        shutil.copy2(path, path.with_name(path.name+'.before-cua'))
+        path.write_text(text)
+path = H/'.claude.json'
+if path.exists():
+    d = json.loads(path.read_text())
+    d.setdefault('mcpServers', {})['cua-driver'] = {'type':'stdio','command':command,'args':[]}
+    shutil.copy2(path, path.with_name('.claude.json.before-cua'))
+    path.write_text(json.dumps(d,indent=2)+'\n')
+    path.chmod(0o600)
+config = H/'.config/hypr/hyprland.lua'
+if config.exists() and 'cua.lua' not in config.read_text() and 'require("hypr.cua")' not in config.read_text():
+    shutil.copy2(config,config.with_suffix('.lua.before-cua'))
+    config.write_text(config.read_text()+'\n-- Cua desktop input integration.\nlocal cua_config = os.getenv("HOME") .. "/.config/hypr/cua.lua"\nlocal cua_file = io.open(cua_config, "r")\nif cua_file then\n  cua_file:close()\n  dofile(cua_config)\nend\n')
+run('systemctl','--user','daemon-reload')
+run('systemctl','--user','enable','--now','cua-driver.service')
+print('Cua packages, service, skills and MCP configured. Log out and back in to load the Hyprland plugin.')
